@@ -1,0 +1,56 @@
+name: Update Homebrew Cask
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  update-cask:
+    name: Update Cask Formula
+    runs-on: macos-15
+    if: "!github.event.release.prerelease"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Get Release Info
+        id: release
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download Release ZIP
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern "LaunchAudit-${{ github.event.release.tag_name }}.zip" \
+            --dir /tmp
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Calculate SHA-256
+        id: sha
+        run: |
+          SHA=$(shasum -a 256 /tmp/LaunchAudit-${{ github.event.release.tag_name }}.zip | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA-256: $SHA"
+
+      - name: Update Cask Formula
+        run: |
+          sed -i '' "s/version \".*\"/version \"${{ steps.release.outputs.version }}\"/" Casks/launchaudit.rb
+          sed -i '' "s/sha256 \".*\"/sha256 \"${{ steps.sha.outputs.sha256 }}\"/" Casks/launchaudit.rb
+
+      - name: Commit Updated Cask
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/launchaudit.rb
+          git commit -m "Update Homebrew cask to ${{ steps.release.outputs.version }}"
+          git push

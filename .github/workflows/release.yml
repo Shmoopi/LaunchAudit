@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, Notarize & Release
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.0.app
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      # ── Code Signing Setup ──────────────────────────────────────────────
+      - name: Install Apple Certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 \
+            -k $KEYCHAIN_PATH
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" \
+            $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+      # ── Build ───────────────────────────────────────────────────────────
+      - name: Build Release Archive
+        env:
+          CODE_SIGN_IDENTITY: ${{ secrets.CODE_SIGN_IDENTITY }}
+          DEVELOPMENT_TEAM: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          xcodebuild archive \
+            -project LaunchAudit.xcodeproj \
+            -scheme LaunchAudit \
+            -configuration Release \
+            -archivePath build/LaunchAudit.xcarchive \
+            CODE_SIGN_IDENTITY="$CODE_SIGN_IDENTITY" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            CODE_SIGN_STYLE=Manual \
+            OTHER_CODE_SIGN_FLAGS="--timestamp --options runtime"
+
+      - name: Export App from Archive
+        run: |
+          mkdir -p build/export
+          cp -R build/LaunchAudit.xcarchive/Products/Applications/LaunchAudit.app build/export/
+
+      - name: Extract App Version
+        id: version
+        run: |
+          APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
+            build/export/LaunchAudit.app/Contents/Info.plist)
+          APP_BUILD=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" \
+            build/export/LaunchAudit.app/Contents/Info.plist)
+          echo "number=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build=${APP_BUILD}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${APP_VERSION} (build ${APP_BUILD})"
+
+      # ── Notarization ────────────────────────────────────────────────────
+      - name: Create ZIP for Notarization
+        run: |
+          ditto -c -k --keepParent build/export/LaunchAudit.app build/LaunchAudit-notarize.zip
+
+      - name: Submit for Notarization
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          xcrun notarytool submit build/LaunchAudit-notarize.zip \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+
+      - name: Staple Notarization Ticket
+        run: |
+          xcrun stapler staple build/export/LaunchAudit.app
+
+      - name: Verify Notarization
+        run: |
+          spctl --assess --type exec --verbose=2 build/export/LaunchAudit.app
+          xcrun stapler validate build/export/LaunchAudit.app
+
+      # ── Package ─────────────────────────────────────────────────────────
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "LaunchAudit" \
+            -srcfolder build/export \
+            -ov -format UDZO \
+            build/LaunchAudit-${{ steps.version.outputs.tag }}.dmg
+
+      - name: Notarize DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM }}
+        run: |
+          xcrun notarytool submit build/LaunchAudit-${{ steps.version.outputs.tag }}.dmg \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait \
+            --timeout 30m
+          xcrun stapler staple build/LaunchAudit-${{ steps.version.outputs.tag }}.dmg
+
+      - name: Create ZIP (release artifact)
+        run: |
+          cd build/export
+          ditto -c -k --keepParent LaunchAudit.app ../LaunchAudit-${{ steps.version.outputs.tag }}.zip
+
+      # ── Checksums ───────────────────────────────────────────────────────
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd build
+          shasum -a 256 LaunchAudit-${{ steps.version.outputs.tag }}.dmg > LaunchAudit-${{ steps.version.outputs.tag }}.sha256
+          shasum -a 256 LaunchAudit-${{ steps.version.outputs.tag }}.zip >> LaunchAudit-${{ steps.version.outputs.tag }}.sha256
+          cat LaunchAudit-${{ steps.version.outputs.tag }}.sha256
+
+      # ── Release ─────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            build/LaunchAudit-${{ steps.version.outputs.tag }}.dmg
+            build/LaunchAudit-${{ steps.version.outputs.tag }}.zip
+            build/LaunchAudit-${{ steps.version.outputs.tag }}.sha256
+
+      # ── Cleanup ─────────────────────────────────────────────────────────
+      - name: Cleanup Keychain
+        if: always()
+        run: |
+          security delete-keychain $RUNNER_TEMP/app-signing.keychain-db || true

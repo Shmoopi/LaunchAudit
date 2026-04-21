@@ -1,0 +1,575 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		358095AF96F41A0690430816 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 303A175310EAA2D592E97F58 /* Security.framework */; };
+		B1B096BE9E71EABBEF485A60 /* ServiceManagement.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 317258EDFF30C64D38CF2766 /* ServiceManagement.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		3A4856BB13431BA562F1D8AE /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F4AF653C5F69B8F9173F8D56 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1466D1346837F3615E930A09;
+			remoteInfo = LaunchAudit;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0D096B25F05451A2B95EDB59 /* LaunchAudit.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LaunchAudit.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		303A175310EAA2D592E97F58 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
+		317258EDFF30C64D38CF2766 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
+		A276C615667FABFAA7C187D7 /* LaunchAuditTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaunchAuditTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D29DCA86758998FF33B283CA /* com.launchaudit.helper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = com.launchaudit.helper; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		4C3CE32F2F8DF5A7005E0D10 /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */;
+		};
+		4C3CE3A42F8DF5AA005E0D10 /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Coordination/HelperProtocol.swift,
+			);
+			target = 1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LaunchAudit;
+			sourceTree = "<group>";
+		};
+		4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				4C3CE32F2F8DF5A7005E0D10 /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */,
+			);
+			path = LaunchAuditHelper;
+			sourceTree = "<group>";
+		};
+		4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				4C3CE3A42F8DF5AA005E0D10 /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */,
+			);
+			path = LaunchAuditKit;
+			sourceTree = "<group>";
+		};
+		4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = LaunchAuditTests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FB4564FFAF7992C1231FF250 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				358095AF96F41A0690430816 /* Security.framework in Frameworks */,
+				B1B096BE9E71EABBEF485A60 /* ServiceManagement.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		437E879E3277C6CBB9E105A0 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				303A175310EAA2D592E97F58 /* Security.framework */,
+				317258EDFF30C64D38CF2766 /* ServiceManagement.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		7680B13F66DC00AACE54450F = {
+			isa = PBXGroup;
+			children = (
+				4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */,
+				4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */,
+				4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */,
+				4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */,
+				437E879E3277C6CBB9E105A0 /* Frameworks */,
+				AC568269A1616BA2CF16D436 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		AC568269A1616BA2CF16D436 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				0D096B25F05451A2B95EDB59 /* LaunchAudit.app */,
+				D29DCA86758998FF33B283CA /* com.launchaudit.helper */,
+				A276C615667FABFAA7C187D7 /* LaunchAuditTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1466D1346837F3615E930A09 /* LaunchAudit */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ED24596F9F14881D3AE823E2 /* Build configuration list for PBXNativeTarget "LaunchAudit" */;
+			buildPhases = (
+				5700D53E1B2BB3336D59C4F0 /* Sources */,
+				FB4564FFAF7992C1231FF250 /* Frameworks */,
+				4C18A4652F8F330E002DDFA8 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */,
+				4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */,
+			);
+			name = LaunchAudit;
+			packageProductDependencies = (
+			);
+			productName = LaunchAudit;
+			productReference = 0D096B25F05451A2B95EDB59 /* LaunchAudit.app */;
+			productType = "com.apple.product-type.application";
+		};
+		1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BF0E2D66A7A096DDBC5D3E81 /* Build configuration list for PBXNativeTarget "LaunchAuditHelper" */;
+			buildPhases = (
+				35C710F3E747A5D48487537C /* Sources */,
+				FA914189C2EFE175589CF45B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */,
+			);
+			name = LaunchAuditHelper;
+			packageProductDependencies = (
+			);
+			productName = LaunchAuditHelper;
+			productReference = D29DCA86758998FF33B283CA /* com.launchaudit.helper */;
+			productType = "com.apple.product-type.tool";
+		};
+		33231B740F56E1DE61763D56 /* LaunchAuditTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 643EE6402BEA7DBDC6387811 /* Build configuration list for PBXNativeTarget "LaunchAuditTests" */;
+			buildPhases = (
+				39C1F16F37B865DB6D5D41BC /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				32E72E44D65F2727B23D541F /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */,
+			);
+			name = LaunchAuditTests;
+			packageProductDependencies = (
+			);
+			productName = LaunchAuditTests;
+			productReference = A276C615667FABFAA7C187D7 /* LaunchAuditTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		F4AF653C5F69B8F9173F8D56 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2630;
+			};
+			buildConfigurationList = 2D47331A3A5C42973EBA04D3 /* Build configuration list for PBXProject "LaunchAudit" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 7680B13F66DC00AACE54450F;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = AC568269A1616BA2CF16D436 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1466D1346837F3615E930A09 /* LaunchAudit */,
+				1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */,
+				33231B740F56E1DE61763D56 /* LaunchAuditTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		4C18A4652F8F330E002DDFA8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FA914189C2EFE175589CF45B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		35C710F3E747A5D48487537C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		39C1F16F37B865DB6D5D41BC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		5700D53E1B2BB3336D59C4F0 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		32E72E44D65F2727B23D541F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1466D1346837F3615E930A09 /* LaunchAudit */;
+			targetProxy = 3A4856BB13431BA562F1D8AE /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		16419BE56EB0A6BC4F8AD868 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		264D01553F39746FFF30F708 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEAD_CODE_STRIPPING = YES;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		70BC61DBA5B3DB87DAEF24A2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LaunchAudit.app/Contents/MacOS/LaunchAudit";
+			};
+			name = Release;
+		};
+		922273E69BD701DA49F58AB5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = LaunchAuditHelper/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.helper;
+				PRODUCT_NAME = com.launchaudit.helper;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		9C7036F46C45388B8336CC00 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = LaunchAudit/LaunchAudit.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = Q2636DAEP4;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedByXcode;
+				INFOPLIST_KEY_CFBundleDisplayName = "Launch Audit";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright 2026 Shmoopi LLC";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				OTHER_SWIFT_FLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit;
+				PRODUCT_NAME = LaunchAudit;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+			};
+			name = Release;
+		};
+		B5E6B6B3BD58939147935E16 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+				CODE_SIGN_ENTITLEMENTS = LaunchAudit/LaunchAudit.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = Q2636DAEP4;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_GENERATION_MODE = GeneratedByXcode;
+				INFOPLIST_KEY_CFBundleDisplayName = "Launch Audit";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright 2026 Shmoopi LLC";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MARKETING_VERSION = 1.0.0;
+				OTHER_SWIFT_FLAGS = "";
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit;
+				PRODUCT_NAME = LaunchAudit;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_STRICT_CONCURRENCY = complete;
+			};
+			name = Debug;
+		};
+		F52D259E81568F06B6BEB96E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				COMBINE_HIDPI_IMAGES = YES;
+				DEAD_CODE_STRIPPING = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LaunchAudit.app/Contents/MacOS/LaunchAudit";
+			};
+			name = Debug;
+		};
+		F7B5AB033C48A2A374EC3CDE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				COMBINE_HIDPI_IMAGES = YES;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				DEAD_CODE_STRIPPING = YES;
+				ENABLE_HARDENED_RUNTIME = YES;
+				INFOPLIST_FILE = LaunchAuditHelper/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.helper;
+				PRODUCT_NAME = com.launchaudit.helper;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2D47331A3A5C42973EBA04D3 /* Build configuration list for PBXProject "LaunchAudit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				264D01553F39746FFF30F708 /* Debug */,
+				16419BE56EB0A6BC4F8AD868 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		643EE6402BEA7DBDC6387811 /* Build configuration list for PBXNativeTarget "LaunchAuditTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F52D259E81568F06B6BEB96E /* Debug */,
+				70BC61DBA5B3DB87DAEF24A2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BF0E2D66A7A096DDBC5D3E81 /* Build configuration list for PBXNativeTarget "LaunchAuditHelper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				922273E69BD701DA49F58AB5 /* Debug */,
+				F7B5AB033C48A2A374EC3CDE /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		ED24596F9F14881D3AE823E2 /* Build configuration list for PBXNativeTarget "LaunchAudit" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B5E6B6B3BD58939147935E16 /* Debug */,
+				9C7036F46C45388B8336CC00 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = F4AF653C5F69B8F9173F8D56 /* Project object */;
+}

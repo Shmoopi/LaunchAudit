@@ -1,0 +1,79 @@
+name: LaunchAudit
+options:
+  bundleIdPrefix: net.shmoopi
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "16.0"
+  minimumXcodeGenVersion: "2.38.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+
+targets:
+
+  LaunchAudit:
+    type: application
+    platform: macOS
+    sources:
+      - path: LaunchAudit
+      - path: LaunchAuditKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit
+        INFOPLIST_GENERATION_MODE: GeneratedByXcode
+        PRODUCT_NAME: LaunchAudit
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: LaunchAudit/LaunchAudit.entitlements
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.utilities"
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright 2026 Shmoopi LLC"
+        SWIFT_STRICT_CONCURRENCY: complete
+    dependencies:
+      - sdk: Security.framework
+      - sdk: ServiceManagement.framework
+
+  LaunchAuditHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: LaunchAuditHelper
+      - path: LaunchAuditKit/Coordination/HelperProtocol.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit.helper
+        PRODUCT_NAME: net.shmoopi.launchaudit.helper
+        INFOPLIST_FILE: LaunchAuditHelper/Info.plist
+        SKIP_INSTALL: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+
+  LaunchAuditTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: LaunchAuditTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit.tests
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: LaunchAudit
+
+schemes:
+  LaunchAudit:
+    build:
+      targets:
+        LaunchAudit: all
+        LaunchAuditHelper: [run, archive]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - LaunchAuditTests
+    archive:
+      config: Release
