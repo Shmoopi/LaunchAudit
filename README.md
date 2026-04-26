@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="LaunchAudit/Assets.xcassets/AppIcon.appiconset/LaunchAudit_Icon-256.png" width="128" height="128" style="border-radius:50%;"alt="LaunchAudit Icon">
+  <img src="LaunchAudit/Assets.xcassets/AppIconRounded.imageset/LaunchAudit_Icon-256-rounded.png" width="128" height="128" alt="LaunchAudit Icon">
 </p>
 
 <h1 align="center">LaunchAudit</h1>
 
 <p align="center">
   <strong>Comprehensive macOS Persistence Auditor</strong><br>
-  Discover every application, plugin, task, extension, or model registered to run on your Mac.
+  Discover every application, plugin, task, extension, or model registered to run on your Mac.<br>
 </p>
 
 <p align="center">
@@ -15,6 +15,7 @@
   <a href="#installation">Installation</a> &bull;
   <a href="#building-from-source">Building</a> &bull;
   <a href="#usage">Usage</a> &bull;
+  <a href="#command-line-interface">CLI</a> &bull;
   <a href="#architecture">Architecture</a> &bull;
   <a href="#contributing">Contributing</a> &bull;
   <a href="#license">License</a>
@@ -34,6 +35,11 @@
 LaunchAudit scans your Mac for **every known persistence mechanism** — software configured to run automatically at boot, login, on a schedule, or in response to system events. It verifies code signatures, assesses risk, and presents everything in an interactive dashboard so you can understand exactly what's running (or capable of running) on your system.
 
 Whether you're a security professional auditing endpoints, a sysadmin investigating suspicious behavior, or a power user who wants to know what's auto-launching — LaunchAudit gives you full visibility.
+
+LaunchAudit ships as a single universal binary that works in two modes:
+
+- **Application mode** — launch with no arguments to open the interactive SwiftUI dashboard
+- **CLI mode** — pass any argument to run headless scans from the terminal, perfect for scripts, CI pipelines, and remote auditing over SSH
 
 ## Features
 
@@ -94,6 +100,18 @@ Risk levels: **Informational** | **Low** | **Medium** | **High** | **Critical**
 - **JSON** — machine-readable, full fidelity
 - **CSV** — spreadsheet-compatible flat export
 - **HTML** — self-contained, styled report suitable for sharing
+
+### Command-Line Interface
+
+LaunchAudit includes a full CLI:
+
+- Run scans directly from the terminal with colored, structured output
+- Filter by category, group, risk level, signing status, or text search
+- Export to JSON, CSV, or HTML from the command line
+- Convert previously saved JSON reports to other formats
+- Quiet mode for scripting (`key=value` output) and verbose mode for deep inspection
+- Live progress display on stderr (safe for piping stdout)
+- Respects `NO_COLOR` and pipe detection for clean automation
 
 ### Additional Features
 
@@ -213,6 +231,137 @@ xcodebuild test \
 
 Use `File > Export as JSON/CSV/HTML` or the keyboard shortcut `Cmd+Shift+E` to export scan results.
 
+---
+
+## Command-Line Interface
+
+When invoked with any argument, LaunchAudit runs in headless CLI mode — no window, no GUI, just terminal output.
+
+```bash
+# Create a symlink for convenience (after installing the app)
+ln -s /Applications/LaunchAudit.app/Contents/MacOS/LaunchAudit /usr/local/bin/launchaudit
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `scan` | Scan for persistence mechanisms (default) |
+| `categories` | List all 35 persistence categories |
+| `groups` | List all category groups |
+| `export <file>` | Convert a saved JSON scan result to another format |
+| `version` | Show version information |
+| `help [command]` | Show help (optionally for a specific command) |
+
+### Quick Start
+
+```bash
+# Run a scan (Apple-signed items are hidden by default)
+launchaudit scan
+
+# Include Apple-signed items
+launchaudit scan --show-apple
+
+# Show only high and critical risk items
+launchaudit scan --min-risk high
+
+# Show only unsigned items with full details
+launchaudit scan --unsigned-only --verbose
+
+# Export directly to JSON
+launchaudit scan --format json -o report.json
+
+# Export to HTML report
+launchaudit scan -o report.html
+
+# Quiet mode for scripting
+launchaudit scan --quiet
+# Output: critical=0 high=2 medium=5 low=12 info=31 total=50
+```
+
+### Scan Options
+
+#### Output Options
+
+| Option | Description |
+|--------|-------------|
+| `--format <fmt>` | Output format: `table`, `json`, `csv`, `html` (default: `table`) |
+| `-o, --output <path>` | Write output to a file (format auto-detected from extension) |
+| `--no-color` | Disable colored output |
+| `--no-progress` | Disable the live progress display |
+| `--quiet, -q` | Machine-readable summary as `key=value` pairs |
+| `--verbose` | Show full details for every item (signing, timestamps, risk reasons) |
+
+#### Filter Options
+
+| Option | Description |
+|--------|-------------|
+| `--show-apple` | Include Apple-signed items (hidden by default) |
+| `--hide-apple` | Hide Apple-signed items (this is the default) |
+| `--min-risk <level>` | Minimum risk level: `informational`, `low`, `medium`, `high`, `critical` |
+| `--unsigned-only` | Show only unsigned items |
+| `--third-party` | Show only third-party (non-Apple) items |
+| `--search, -s <query>` | Filter items by text search across names, labels, and paths |
+| `--category <id>` | Restrict scan to a specific category (repeatable) |
+| `--group <name>` | Restrict scan to a category group (repeatable) |
+
+### Filtering by Category and Group
+
+```bash
+# List all available categories and their IDs
+launchaudit categories
+
+# List categories within a specific group
+launchaudit categories --group "System Services"
+
+# List all category groups
+launchaudit groups
+
+# Scan only Launch Daemons and Launch Agents
+launchaudit scan --category launchDaemons --category launchAgents
+
+# Scan all categories in the "Security Plugins" group
+launchaudit scan --group "Security Plugins"
+```
+
+### Export and Format Conversion
+
+```bash
+# Save a scan as JSON for later analysis
+launchaudit scan --format json -o audit-2026-04-25.json
+
+# Convert a saved JSON scan to an HTML report
+launchaudit export audit-2026-04-25.json --format html -o report.html
+
+# Convert to CSV for spreadsheet import
+launchaudit export audit-2026-04-25.json -o results.csv
+
+# Pipe JSON directly to jq
+launchaudit scan --format json | jq '.items[] | select(.riskLevel == "high")'
+```
+
+The output format is auto-detected from the file extension when using `-o`, so `--format` is only needed when writing to stdout or overriding the extension.
+
+### Scripting and Automation
+
+```bash
+# Quick health check in a script
+result=$(launchaudit scan --quiet)
+critical=$(echo "$result" | grep -o 'critical=[0-9]*' | cut -d= -f2)
+if [ "$critical" -gt 0 ]; then
+  echo "WARNING: $critical critical persistence items found"
+  exit 1
+fi
+
+# Pipe-safe — progress goes to stderr, data goes to stdout
+launchaudit scan --format csv > items.csv
+
+# Disable color for log files
+launchaudit scan --no-color > audit.log 2>&1
+```
+
+---
+
 ### Administrator Access
 
 LaunchAudit never modifies any files — it only reads system state. Some system locations require elevated privileges:
@@ -224,19 +373,25 @@ LaunchAudit never modifies any files — it only reads system state. Some system
 - Background Task Management database
 - Configuration Profiles
 
-If you decline the password prompt, the scan will still cover all items readable by your user account.
+If you decline the password prompt (GUI) or run without `sudo` (CLI), the scan will still cover all items readable by your user account. Locations that could not be accessed are reported as scan warnings.
 
 ## Architecture
 
 ```
 LaunchAudit/
-├── LaunchAudit/                 # Main app target (SwiftUI)
-│   ├── App/                     # App entry point, ContentView
+├── LaunchAudit/                 # Main app target
+│   ├── App/
+│   │   ├── Entry.swift          # @main — routes to GUI or CLI based on arguments
+│   │   ├── LaunchAuditApp.swift # SwiftUI App (GUI mode)
+│   │   └── ContentView.swift
+│   ├── CLI/
+│   │   ├── CLI.swift            # Argument parser, command dispatch, scan runner
+│   │   └── Terminal.swift       # ANSI formatting, structured output, help text
 │   ├── Views/                   # Dashboard, Sidebar, ItemList, Detail, Export, Welcome
 │   ├── ViewModels/              # ScanViewModel
 │   └── Assets.xcassets/         # App icon and asset catalog
 │
-├── LaunchAuditKit/              # Core framework (scanner logic)
+├── LaunchAuditKit/              # Core framework (scanner logic, shared by GUI + CLI)
 │   ├── Models/                  # PersistenceItem, PersistenceCategory, RiskLevel, etc.
 │   ├── Scanners/                # 35 individual PersistenceScanner implementations
 │   ├── Analysis/                # RiskAnalyzer, RiskClassifier, SigningVerifier
@@ -258,14 +413,6 @@ LaunchAudit/
 ├── project.yml                  # XcodeGen project specification
 └── README.md
 ```
-
-### Key Design Decisions
-
-- **Concurrent scanning** — all 35 scanners run in parallel using Swift `TaskGroup`
-- **Sliding-window signature verification** — up to 12 concurrent `SecStaticCode` checks
-- **Strict concurrency** — `SWIFT_STRICT_CONCURRENCY: complete` with all models `Sendable`
-- **Read-only** — the app never modifies system files, only reads and reports
-- **Modular scanners** — each persistence mechanism is its own scanner conforming to `PersistenceScanner`
 
 ## Contributing
 

@@ -12,8 +12,9 @@ public struct LoginHookScanner: PersistenceScanner {
         var items: [PersistenceItem] = []
 
         for hookType in ["LoginHook", "LogoutHook"] {
-            if let output = await ProcessRunner.shared.tryShell(
-                "defaults read com.apple.loginwindow \(hookType) 2>/dev/null"
+            if let output = await ProcessRunner.shared.tryRun(
+                "/usr/bin/defaults",
+                arguments: ["read", "com.apple.loginwindow", hookType]
             ) {
                 let path = output.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !path.isEmpty else { continue }

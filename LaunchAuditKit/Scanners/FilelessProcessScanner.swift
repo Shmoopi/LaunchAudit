@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct FilelessProcessScanner: PersistenceScanner {
     public let category = PersistenceCategory.filelessProcesses
@@ -9,52 +10,60 @@ public struct FilelessProcessScanner: PersistenceScanner {
     public init() {}
 
     public func scan() async throws -> [PersistenceItem] {
-        // Get all running processes with their PIDs and executable paths
-        guard let psOutput = await ProcessRunner.shared.tryShell(
-            "ps -axo pid=,comm= 2>/dev/null"
+        // Single ps call covers PID, owner, and command — eliminates the
+        // per-PID `ps -o user=` and `lsof -p` calls the previous version made.
+        guard let psOutput = await ProcessRunner.shared.tryRun(
+            "/bin/ps", arguments: ["-axo", "pid=,user=,comm="]
         ) else {
             return []
         }
 
         var items: [PersistenceItem] = []
         var seenPaths = Set<String>()
+        let selfPID = ProcessInfo.processInfo.processIdentifier
 
         for line in psOutput.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
 
-            // Parse "  PID COMMAND" — PID is right-aligned, command follows
-            let parts = trimmed.split(separator: " ", maxSplits: 1)
-            guard parts.count == 2,
-                  let pid = Int(parts[0]) else { continue }
+            // Format: "  PID USER COMMAND"
+            let parts = trimmed.split(separator: " ", maxSplits: 2,
+                                      omittingEmptySubsequences: true)
+            guard parts.count == 3,
+                  let pid = Int32(parts[0]) else { continue }
 
-            let comm = String(parts[1])
+            let user = String(parts[1])
+            let comm = String(parts[2])
 
-            // Skip kernel processes (pid 0) and this process
-            guard pid > 0, pid != ProcessInfo.processInfo.processIdentifier else { continue }
+            // Skip kernel processes and self.
+            guard pid > 0, pid != selfPID else { continue }
 
             // Only check absolute paths — relative names (e.g. "kernel_task")
-            // don't refer to user-space binaries
+            // don't refer to user-space binaries.
             guard comm.hasPrefix("/") else { continue }
 
-            // Deduplicate — multiple instances of the same deleted binary
+            // Deduplicate identical paths (e.g. multiple instances of the
+            // same deleted binary).
             guard !seenPaths.contains(comm) else { continue }
             seenPaths.insert(comm)
 
             // The key check: does the binary still exist on disk?
             guard !PathUtilities.exists(comm) else { continue }
 
-            // Resolve the actual executable path via /proc or lsof for confirmation
-            let procPath = await resolveExecutablePath(pid: pid)
+            // Native libproc lookup — no subprocess. Returns the process's
+            // current executable path (which may differ from `comm` for
+            // processes that re-exec'd or whose binary was overwritten).
+            let resolvedPath = Self.executablePath(forPID: pid)
 
             let name = (comm as NSString).lastPathComponent
-            let owner: ItemOwner = await processOwner(pid: pid)
+            let owner: ItemOwner = (user == "root" || user.isEmpty)
+                ? .system : .user(user)
 
             items.append(PersistenceItem(
                 category: category,
                 name: "\(name) (PID \(pid))",
                 label: comm,
-                executablePath: procPath ?? comm,
+                executablePath: resolvedPath ?? comm,
                 isEnabled: true,
                 runContext: .always,
                 owner: owner,
@@ -75,31 +84,15 @@ public struct FilelessProcessScanner: PersistenceScanner {
         return items
     }
 
-    /// Try to resolve the actual executable path for a running process.
-    private func resolveExecutablePath(pid: Int) async -> String? {
-        // Use lsof to find the process executable
-        guard let output = await ProcessRunner.shared.tryShell(
-            "lsof -p \(pid) -Fn 2>/dev/null | head -5"
-        ) else { return nil }
+    /// Resolve a PID's executable path via libproc — no subprocess.
+    /// Buffer size is `4 * MAXPATHLEN` (PROC_PIDPATHINFO_MAXSIZE) — that
+    /// macro isn't bridged into Swift, so the literal lives here.
+    private static let pidPathBufferSize = 4 * 1024
 
-        for line in output.components(separatedBy: "\n") {
-            if line.hasPrefix("n") && line.contains("/") {
-                return String(line.dropFirst())
-            }
-        }
-        return nil
-    }
-
-    /// Determine the owner of a running process.
-    private func processOwner(pid: Int) async -> ItemOwner {
-        guard let output = await ProcessRunner.shared.tryShell(
-            "ps -o user= -p \(pid) 2>/dev/null"
-        ) else { return .system }
-
-        let user = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if user == "root" || user.isEmpty {
-            return .system
-        }
-        return .user(user)
+    private static func executablePath(forPID pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: pidPathBufferSize)
+        let ret = proc_pidpath(pid, &buffer, UInt32(pidPathBufferSize))
+        guard ret > 0 else { return nil }
+        return String(cString: buffer)
     }
 }

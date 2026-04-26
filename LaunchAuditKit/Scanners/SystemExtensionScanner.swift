@@ -14,7 +14,9 @@ public struct SystemExtensionScanner: PersistenceScanner {
         var items: [PersistenceItem] = []
 
         // Query systemextensionsctl
-        if let output = await ProcessRunner.shared.tryShell("systemextensionsctl list 2>/dev/null") {
+        if let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/systemextensionsctl", arguments: ["list"]
+        ) {
             items.append(contentsOf: parseSystemExtensionsList(output))
         }
 

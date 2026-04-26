@@ -27,9 +27,11 @@ public struct KextScanner: PersistenceScanner {
             }
         }
 
-        // Query loaded kexts via kmutil
-        if let output = await ProcessRunner.shared.tryShell("kmutil showloaded --show loaded 2>/dev/null") {
-            let loaded = parseKmutilOutput(output)
+        // Query loaded kexts via kmutil — direct exec, no /bin/sh fork.
+        if let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/kmutil", arguments: ["showloaded", "--show", "loaded"]
+        ) {
+            let loaded = Self.parseKmutilOutput(output)
             // Mark on-disk items as running if they appear in loaded list
             for (index, item) in items.enumerated() {
                 if let label = item.label, loaded.contains(label) {
@@ -87,15 +89,32 @@ public struct KextScanner: PersistenceScanner {
         )
     }
 
-    private func parseKmutilOutput(_ output: String) -> Set<String> {
+    /// Test seam — exposes the strict parser without going through scan().
+    func parseLoadedBundleIDsForTesting(_ output: String) -> Set<String> {
+        Self.parseKmutilOutput(output)
+    }
+
+    /// Compiled once. Reverse-DNS bundle identifier:
+    ///   `<segment>(.<segment>)+` where each segment starts with a letter
+    ///   and contains only letters, digits, `_`, or `-`.
+    /// Rejects IPs (digit-led segments), parenthesised tokens, paths, and
+    /// version strings — the false positives the previous loose check produced.
+    private static let bundleIDRegex: NSRegularExpression = {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(
+            pattern: #"^[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z][A-Za-z0-9_-]*)+$"#
+        )
+    }()
+
+    private static func parseKmutilOutput(_ output: String) -> Set<String> {
         var bundleIDs = Set<String>()
         for line in output.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            // kmutil output has bundle IDs in various column positions
-            let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            for part in parts {
-                if part.contains(".") && !part.hasPrefix("/") && !part.hasPrefix("(") {
-                    bundleIDs.insert(part)
+            for part in trimmed.split(separator: " ", omittingEmptySubsequences: true) {
+                let token = String(part)
+                let range = NSRange(location: 0, length: (token as NSString).length)
+                if bundleIDRegex.firstMatch(in: token, range: range) != nil {
+                    bundleIDs.insert(token)
                 }
             }
         }

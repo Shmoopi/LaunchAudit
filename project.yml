@@ -24,7 +24,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit
         INFOPLIST_GENERATION_MODE: GeneratedByXcode
         PRODUCT_NAME: LaunchAudit
-        MARKETING_VERSION: "1.0.0"
+        MARKETING_VERSION: "1.1.0"
         CURRENT_PROJECT_VERSION: "1"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: LaunchAudit/LaunchAudit.entitlements
@@ -35,6 +35,38 @@ targets:
     dependencies:
       - sdk: Security.framework
       - sdk: ServiceManagement.framework
+      # Force the helper to build first so we can embed it below.
+      - target: LaunchAuditHelper
+        embed: false
+    # Embed the privileged helper into the app bundle layout that
+    # SMAppService.daemon(plistName:) expects:
+    #   - Contents/MacOS/<helperBundleID>          (binary)
+    #   - Contents/Library/LaunchDaemons/<id>.plist (launchd plist)
+    # The plist's BundleProgram references the binary at the path above.
+    postBuildScripts:
+      - name: "Embed Privileged Helper"
+        basedOnDependencyAnalysis: false
+        shell: /bin/bash
+        script: |
+          set -euo pipefail
+          HELPER_NAME="net.shmoopi.launchaudit.helper"
+          APP_DIR="${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}"
+          DAEMONS_DIR="${APP_DIR}/Contents/Library/LaunchDaemons"
+          MACOS_DIR="${APP_DIR}/Contents/MacOS"
+
+          mkdir -p "${DAEMONS_DIR}"
+          cp -f "${SRCROOT}/LaunchAuditHelper/${HELPER_NAME}.plist" \
+                "${DAEMONS_DIR}/${HELPER_NAME}.plist"
+
+          # The helper target's PRODUCT_NAME is the bundle ID, so its
+          # built binary lives at BUILT_PRODUCTS_DIR/<HELPER_NAME>.
+          if [ -f "${BUILT_PRODUCTS_DIR}/${HELPER_NAME}" ]; then
+            cp -f "${BUILT_PRODUCTS_DIR}/${HELPER_NAME}" \
+                  "${MACOS_DIR}/${HELPER_NAME}"
+            chmod +x "${MACOS_DIR}/${HELPER_NAME}"
+          else
+            echo "warning: helper binary not found at ${BUILT_PRODUCTS_DIR}/${HELPER_NAME}"
+          fi
 
   LaunchAuditHelper:
     type: tool
@@ -77,3 +109,4 @@ schemes:
         - LaunchAuditTests
     archive:
       config: Release
+

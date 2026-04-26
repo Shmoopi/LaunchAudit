@@ -11,7 +11,16 @@ public struct BTMScanner: PersistenceScanner {
     public init() {}
 
     public func scan() async throws -> [PersistenceItem] {
-        guard let output = await ProcessRunner.shared.tryShell("sfltool dumpbtm 2>/dev/null") else {
+        // `sfltool dumpbtm` only produces useful output when run as root.
+        // Without root it hangs indefinitely on macOS 14+ — return empty
+        // immediately rather than wait for the timeout.
+        guard getuid() == 0 else { return [] }
+
+        // Even as root, cap at 5s — dumpbtm has occasionally been observed
+        // to stall on machines with corrupt BTM databases.
+        guard let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/sfltool", arguments: ["dumpbtm"], timeout: 5
+        ) else {
             return []
         }
         return parseBTMOutput(output)

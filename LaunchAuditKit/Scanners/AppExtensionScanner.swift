@@ -12,7 +12,9 @@ public struct AppExtensionScanner: PersistenceScanner {
         var items: [PersistenceItem] = []
 
         // Query pluginkit for all registered extensions
-        guard let output = await ProcessRunner.shared.tryShell("pluginkit -mAD 2>/dev/null") else {
+        guard let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/pluginkit", arguments: ["-mAD"]
+        ) else {
             return items
         }
 

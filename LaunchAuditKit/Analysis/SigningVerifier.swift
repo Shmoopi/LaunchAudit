@@ -2,54 +2,60 @@ import Foundation
 import Security
 
 /// Verifies code signatures. NOT an actor — verification is CPU-bound and
-/// safe to call from multiple tasks concurrently. The cache is protected
-/// by NSCache's internal thread-safety (it's documented as thread-safe).
+/// safe to call from multiple tasks concurrently. The in-memory cache is
+/// protected by NSCache's internal thread-safety; the disk store has its
+/// own internal lock.
 public final class SigningVerifier: Sendable {
-    /// Thread-safe wrapper for NSCache. NSCache is documented as thread-safe,
-    /// so we use @unchecked Sendable to satisfy the compiler.
-    private final class Cache: @unchecked Sendable {
-        private let storage = NSCache<NSString, CacheEntry>()
-        
-        func object(forKey key: NSString) -> CacheEntry? {
-            storage.object(forKey: key)
-        }
-        
-        func setObject(_ obj: CacheEntry, forKey key: NSString) {
-            storage.setObject(obj, forKey: key)
-        }
-    }
-    
-    private let cache = Cache()
 
-    private final class CacheEntry {
-        let modDate: Date?
-        let info: SigningInfo
-        init(modDate: Date?, info: SigningInfo) {
-            self.modDate = modDate
-            self.info = info
-        }
+    private let cache = InMemoryCache()
+    private let diskStore: DiskStore?
+
+    /// Default initializer — uses the user's Caches directory for persistence.
+    public init() {
+        self.diskStore = DiskStore.defaultStore()
+        diskStore?.warmInMemoryCache(cache)
     }
 
-    public init() {}
+    /// Inject a custom cache directory (or `nil` to disable persistence).
+    /// Used by tests and for opting out of disk caching.
+    public init(cacheDirectory: URL?) {
+        self.diskStore = cacheDirectory.map { DiskStore(directory: $0) }
+        diskStore?.warmInMemoryCache(cache)
+    }
 
     /// Verify the code signature of a binary at the given path.
     /// Safe to call from any task — no actor serialization.
     public func verify(path: String) -> SigningInfo {
-        let key = path as NSString
-        let currentMod = PathUtilities.timestamps(for: path).modified
+        verify(path: path, knownModDate: nil)
+    }
 
-        if let cached = cache.object(forKey: key), cached.modDate == currentMod {
+    /// Verify with a pre-fetched modification date — avoids a redundant `stat`
+    /// when the caller has already gathered timestamps in bulk.
+    public func verify(path: String, knownModDate: Date?) -> SigningInfo {
+        let modDate = knownModDate ?? PathUtilities.timestamps(for: path).modified
+        let key = path as NSString
+
+        if let cached = cache.object(forKey: key), cached.modDate == modDate {
             return cached.info
         }
 
         let info = performVerification(path: path)
-        cache.setObject(CacheEntry(modDate: currentMod, info: info), forKey: key)
+        let entry = CacheEntry(modDate: modDate, info: info)
+        cache.setObject(entry, forKey: key)
+        diskStore?.record(path: path, modDate: modDate, info: info)
         return info
     }
 
+    /// Persist the in-memory cache delta to disk. Cheap if no new entries
+    /// have been added since the last flush.
+    public func flushDiskCache() {
+        diskStore?.flush()
+    }
+
+    // MARK: - Internal verification
+
     private func performVerification(path: String) -> SigningInfo {
         // Suppress stderr noise from Security.framework
-        // (e.g. "open(/private/var/db/DetachedSignatures) - No such file or directory")
         let originalStderr = dup(STDERR_FILENO)
         let devNull = open("/dev/null", O_WRONLY)
         if devNull >= 0 {
@@ -82,7 +88,6 @@ public final class SigningVerifier: Sendable {
             return .unsigned
         }
 
-        // Only request signing info (not entitlements/requirements — they're slow)
         var cfInfo: CFDictionary?
         let infoStatus = SecCodeCopySigningInformation(
             code, SecCSFlags(rawValue: kSecCSSigningInformation), &cfInfo
@@ -105,18 +110,10 @@ public final class SigningVerifier: Sendable {
             }
         }
 
-        // Check the leaf certificate (first in chain) to determine if
-        // this is Apple's own binary vs. a third-party Developer ID binary.
-        // Apple's own apps use leaf certs like "Software Signing" or
-        // "Apple Mac OS Application Signing".  Third-party apps use
-        // "Developer ID Application: ..." — their chain also includes
-        // "Apple Root CA", so checking any cert would be too broad.
         let isAppleSigned: Bool = {
             guard let leaf = authorities.first else { return false }
-            // Apple's own signing identities
             if leaf == "Software Signing" { return true }
             if leaf.hasPrefix("Apple ") { return true }
-            // Apple system software (some internal certs)
             if leaf == "Software Update" { return true }
             return false
         }()
@@ -129,14 +126,21 @@ public final class SigningVerifier: Sendable {
             cdHash = uniqueID.map { String(format: "%02x", $0) }.joined()
         }
 
-        // Skip spctl for Apple-signed binaries (they're always notarized)
-        // and for ad-hoc signed binaries (they can't be notarized).
-        // spctl is extremely slow (~2-5s per binary, contacts Apple servers).
+        // Determine notarization. Order matters — each step is much cheaper
+        // than the last, so prefer the early-exit paths.
+        //
+        //   1. Apple-signed → always notarized (no work)
+        //   2. Ad-hoc → can never be notarized (no work)
+        //   3. csreq "notarized" check via Security.framework — local only,
+        //      uses stapled ticket if present (~1ms)
+        //   4. spctl --assess — last resort, contacts Apple (2s timeout)
         let isNotarized: Bool
         if isAppleSigned {
             isNotarized = true
         } else if isAdHoc {
             isNotarized = false
+        } else if Self.checkNotarizedRequirement(code) {
+            isNotarized = true
         } else {
             isNotarized = checkNotarization(path: path)
         }
@@ -153,7 +157,25 @@ public final class SigningVerifier: Sendable {
         )
     }
 
-    /// Check notarization via spctl with a timeout.
+    /// Local-only notarization check via the csreq "notarized" requirement.
+    /// Returns true when the binary has a stapled notarization ticket.
+    /// Avoids the spctl subprocess entirely (no fork, no network).
+    private static func checkNotarizedRequirement(_ code: SecStaticCode) -> Bool {
+        var requirement: SecRequirement?
+        let createStatus = SecRequirementCreateWithString(
+            "notarized" as CFString, SecCSFlags(), &requirement
+        )
+        guard createStatus == errSecSuccess, let req = requirement else {
+            return false
+        }
+        let status = SecStaticCodeCheckValidity(
+            code, SecCSFlags(rawValue: kSecCSBasicValidateOnly), req
+        )
+        return status == errSecSuccess
+    }
+
+    /// Check notarization via spctl with a tight timeout. Last-resort fallback;
+    /// the SecRequirement fast-path above handles the common case.
     private func checkNotarization(path: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/spctl")
@@ -167,8 +189,7 @@ public final class SigningVerifier: Sendable {
             return false
         }
 
-        // 5-second timeout — spctl can hang if network is slow
-        let deadline = DispatchTime.now() + .seconds(5)
+        let deadline = DispatchTime.now() + .seconds(2)
         let semaphore = DispatchSemaphore(value: 0)
 
         DispatchQueue.global().async {
@@ -182,5 +203,105 @@ public final class SigningVerifier: Sendable {
         }
 
         return process.terminationStatus == 0
+    }
+}
+
+// MARK: - Cache types
+
+fileprivate final class CacheEntry {
+    let modDate: Date?
+    let info: SigningInfo
+    init(modDate: Date?, info: SigningInfo) {
+        self.modDate = modDate
+        self.info = info
+    }
+}
+
+/// Thread-safe wrapper for NSCache. NSCache is documented as thread-safe.
+fileprivate final class InMemoryCache: @unchecked Sendable {
+    private let storage = NSCache<NSString, CacheEntry>()
+
+    func object(forKey key: NSString) -> CacheEntry? {
+        storage.object(forKey: key)
+    }
+
+    func setObject(_ obj: CacheEntry, forKey key: NSString) {
+        storage.setObject(obj, forKey: key)
+    }
+}
+
+// MARK: - Persistent disk store
+
+/// Persists signing-verification results across app launches.
+/// Storage format: a single plist `[String: Record]` keyed by absolute path.
+/// Atomic writes only happen on `flush()` so verification stays fast.
+fileprivate final class DiskStore: @unchecked Sendable {
+    private let storeURL: URL
+    private let lock = NSLock()
+    private var entries: [String: Record] = [:]
+    private var isDirty = false
+
+    init(directory: URL) {
+        self.storeURL = directory.appendingPathComponent("SigningCache.plist")
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true
+        )
+        self.entries = Self.load(from: storeURL)
+    }
+
+    static func defaultStore() -> DiskStore? {
+        let fm = FileManager.default
+        guard let cachesDir = try? fm.url(
+            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        ) else {
+            return nil
+        }
+        let appDir = cachesDir.appendingPathComponent("LaunchAudit", isDirectory: true)
+        return DiskStore(directory: appDir)
+    }
+
+    /// Pre-populate the in-memory cache from the persisted dict so that the
+    /// first `verify()` calls hit instantly without going to disk.
+    func warmInMemoryCache(_ cache: InMemoryCache) {
+        lock.lock()
+        let snapshot = entries
+        lock.unlock()
+        for (path, record) in snapshot {
+            let entry = CacheEntry(modDate: record.modDate, info: record.info)
+            cache.setObject(entry, forKey: path as NSString)
+        }
+    }
+
+    func record(path: String, modDate: Date?, info: SigningInfo) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries[path] = Record(modDate: modDate, info: info)
+        isDirty = true
+    }
+
+    func flush() {
+        lock.lock()
+        guard isDirty else {
+            lock.unlock()
+            return
+        }
+        let snapshot = entries
+        isDirty = false
+        lock.unlock()
+
+        guard let data = try? PropertyListEncoder().encode(snapshot) else {
+            return
+        }
+        try? data.write(to: storeURL, options: .atomic)
+    }
+
+    private static func load(from url: URL) -> [String: Record] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        return (try? PropertyListDecoder().decode([String: Record].self, from: data)) ?? [:]
+    }
+
+    fileprivate struct Record: Codable {
+        let modDate: Date?
+        let info: SigningInfo
     }
 }

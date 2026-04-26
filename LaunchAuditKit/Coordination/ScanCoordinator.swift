@@ -61,16 +61,41 @@ public final class ScanCoordinator: ObservableObject {
         var allItems: [PersistenceItem] = []
         var allErrors: [ScanError] = []
 
+        // In headless (CLI) mode without root, skip scanners that require
+        // elevated privileges — they may trigger GUI authorization prompts.
+        let isHeadless = ProcessInfo.processInfo.environment["LAUNCHAUDIT_HEADLESS"] != nil
+        let isRoot = getuid() == 0
+
         // Run all scanners concurrently
+        var perScannerTimings: [PersistenceCategory: TimeInterval] = [:]
         await withTaskGroup(of: ScannerOutput.self) { group in
             for scanner in scanners {
+                if isHeadless && !isRoot && scanner.requiresPrivilege {
+                    // Record a permission-denied error instead of running
+                    group.addTask {
+                        ScannerOutput(
+                            category: scanner.category,
+                            items: [],
+                            errors: [ScanError(
+                                category: scanner.category,
+                                message: "Skipped — requires root privileges (run with sudo)",
+                                isPermissionDenied: true
+                            )],
+                            duration: 0
+                        )
+                    }
+                    continue
+                }
+
                 group.addTask {
+                    let started = Date()
                     do {
                         let items = try await scanner.scan()
                         return ScannerOutput(
                             category: scanner.category,
                             items: items,
-                            errors: []
+                            errors: [],
+                            duration: Date().timeIntervalSince(started)
                         )
                     } catch {
                         let scanError = ScanError(
@@ -81,7 +106,8 @@ public final class ScanCoordinator: ObservableObject {
                         return ScannerOutput(
                             category: scanner.category,
                             items: [],
-                            errors: [scanError]
+                            errors: [scanError],
+                            duration: Date().timeIntervalSince(started)
                         )
                     }
                 }
@@ -93,8 +119,10 @@ public final class ScanCoordinator: ObservableObject {
                 progress.completedScanners += 1
                 progress.completedCategories.insert(output.category)
                 progress.itemsFound = allItems.count
+                perScannerTimings[output.category] = output.duration
             }
         }
+        progress.scannerTimings = perScannerTimings
 
         // Phase 2: Verify code signatures in parallel
         progress.phase = .verifyingSignatures
@@ -124,27 +152,37 @@ public final class ScanCoordinator: ObservableObject {
         let maxConcurrency = 12
         var results = items
 
-        // Collect indices that actually need verification
-        let verifiable = items.enumerated().compactMap { (index, item) -> (Int, String)? in
+        // Collect indices that actually need verification, plus a single
+        // bulk-stat per path so SigningVerifier doesn't repeat the syscall.
+        // Some items reuse the same executable (e.g. /usr/sbin/cron called by
+        // many cron entries) — dedupe those into one verify call as well.
+        struct Job {
+            let index: Int
+            let path: String
+            let modDate: Date?
+        }
+        let jobs: [Job] = items.enumerated().compactMap { (index, item) in
             guard let execPath = item.executablePath,
                   PathUtilities.exists(execPath) else { return nil }
-            return (index, execPath)
+            // Single stat per path here — SigningVerifier accepts the result
+            // via its `knownModDate` parameter, skipping its own internal stat.
+            let modDate = PathUtilities.timestamps(for: execPath).modified
+            return Job(index: index, path: execPath, modDate: modDate)
         }
 
-        guard !verifiable.isEmpty else { return results }
+        guard !jobs.isEmpty else { return results }
 
-        // SigningVerifier is no longer an actor — calls run in parallel without serialization
         let verifier = self.signingVerifier
 
         await withTaskGroup(of: (Int, SigningInfo).self) { group in
-            var iterator = verifiable.makeIterator()
+            var iterator = jobs.makeIterator()
             var inFlight = 0
 
             // Seed the group with up to maxConcurrency tasks
-            while inFlight < maxConcurrency, let (index, path) = iterator.next() {
+            while inFlight < maxConcurrency, let job = iterator.next() {
                 group.addTask {
-                    let info = verifier.verify(path: path)
-                    return (index, info)
+                    let info = verifier.verify(path: job.path, knownModDate: job.modDate)
+                    return (job.index, info)
                 }
                 inFlight += 1
             }
@@ -154,15 +192,18 @@ public final class ScanCoordinator: ObservableObject {
                 results[idx].signingInfo = info
                 inFlight -= 1
 
-                if let (nextIndex, nextPath) = iterator.next() {
+                if let next = iterator.next() {
                     group.addTask {
-                        let info = verifier.verify(path: nextPath)
-                        return (nextIndex, info)
+                        let info = verifier.verify(path: next.path, knownModDate: next.modDate)
+                        return (next.index, info)
                     }
                     inFlight += 1
                 }
             }
         }
+
+        // Persist any new entries so subsequent scans skip the heavy work.
+        verifier.flushDiskCache()
 
         return results
     }
@@ -172,6 +213,7 @@ private struct ScannerOutput: Sendable {
     let category: PersistenceCategory
     let items: [PersistenceItem]
     let errors: [ScanError]
+    let duration: TimeInterval
 }
 
 public struct ScanProgress: Sendable {
@@ -180,6 +222,18 @@ public struct ScanProgress: Sendable {
     public var completedCategories: Set<PersistenceCategory> = []
     public var itemsFound: Int = 0
     public var phase: ScanPhase = .scanning
+    /// Per-scanner wall-clock duration. Populated after Phase 1 completes.
+    /// Useful for spotting the slowest scanners on a given system without
+    /// requiring an external profiler.
+    public var scannerTimings: [PersistenceCategory: TimeInterval] = [:]
+
+    /// Top-N scanners by duration, descending. Convenient for diagnostics.
+    public func slowestScanners(limit: Int = 5) -> [(PersistenceCategory, TimeInterval)] {
+        scannerTimings
+            .sorted { $0.value > $1.value }
+            .prefix(limit)
+            .map { ($0.key, $0.value) }
+    }
 
     public var fractionComplete: Double {
         guard totalScanners > 0 else { return 0 }

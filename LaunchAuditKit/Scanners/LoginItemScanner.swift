@@ -16,14 +16,25 @@ public struct LoginItemScanner: PersistenceScanner {
         var items: [PersistenceItem] = []
         var seenNames = Set<String>()
 
-        // Method 1: Query System Events via osascript for login items
-        if let output = await ProcessRunner.shared.tryShell(
-            "osascript -e 'tell application \"System Events\" to get {name, path} of every login item'"
-        ) {
-            let parsed = parseSystemEventsOutput(output)
-            for item in parsed {
-                seenNames.insert(item.name.lowercased())
-                items.append(item)
+        // Method 1: Query System Events via osascript for login items.
+        // Skip in headless/CLI mode — osascript can trigger GUI permission dialogs.
+        // Direct invocation (no /bin/sh fork) plus a 3s cap so a hung
+        // System Events doesn't stall the whole scan; BTMScanner is the
+        // canonical source on macOS 13+ and runs independently.
+        if ProcessInfo.processInfo.environment["LAUNCHAUDIT_HEADLESS"] == nil {
+            if let output = await ProcessRunner.shared.tryRun(
+                "/usr/bin/osascript",
+                arguments: [
+                    "-e",
+                    "tell application \"System Events\" to get {name, path} of every login item"
+                ],
+                timeout: 3
+            ) {
+                let parsed = parseSystemEventsOutput(output)
+                for item in parsed {
+                    seenNames.insert(item.name.lowercased())
+                    items.append(item)
+                }
             }
         }
 

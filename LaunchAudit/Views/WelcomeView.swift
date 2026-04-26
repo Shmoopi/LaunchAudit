@@ -77,6 +77,11 @@ struct WelcomeView: View {
                             PermissionRow(title: "Configuration Profiles")
                         }
 
+                        Text("The helper appears under \u{201C}Allow in the Background\u{201D} in System Settings, but only runs while LaunchAudit is open \u{2014} never on its own.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
                         Text("You can decline \u{2014} the scan will still cover items readable by your user account.")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)

@@ -2,15 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleIdentifier</key>
-    <string>com.launchaudit.helper</string>
-    <key>CFBundleName</key>
-    <string>LaunchAuditHelper</string>
-    <key>CFBundleVersion</key>
-    <string>1.0</string>
-    <key>SMAuthorizedClients</key>
-    <array>
-        <string>identifier "com.launchaudit.app" and anchor apple generic</string>
-    </array>
+	<key>CFBundleIdentifier</key>
+	<string>net.shmoopi.launchaudit.helper</string>
+	<key>CFBundleName</key>
+	<string>LaunchAuditHelper</string>
+	<key>CFBundleVersion</key>
+	<string>1.1.0</string>
+	<key>SMAuthorizedClients</key>
+	<array>
+		<string>identifier &quot;net.shmoopi.launchaudit&quot; and anchor apple generic</string>
+	</array>
 </dict>
 </plist>

@@ -19,6 +19,13 @@
 			remoteGlobalIDString = 1466D1346837F3615E930A09;
 			remoteInfo = LaunchAudit;
 		};
+		C47E0231B1155B87F736EA34 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = F4AF653C5F69B8F9173F8D56 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1DA1D8B185A92BDE5858250A;
+			remoteInfo = LaunchAuditHelper;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
@@ -26,18 +33,18 @@
 		303A175310EAA2D592E97F58 /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		317258EDFF30C64D38CF2766 /* ServiceManagement.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ServiceManagement.framework; path = System/Library/Frameworks/ServiceManagement.framework; sourceTree = SDKROOT; };
 		A276C615667FABFAA7C187D7 /* LaunchAuditTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LaunchAuditTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		D29DCA86758998FF33B283CA /* com.launchaudit.helper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = com.launchaudit.helper; sourceTree = BUILT_PRODUCTS_DIR; };
+		D29DCA86758998FF33B283CA /* net.shmoopi.launchaudit.helper */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = net.shmoopi.launchaudit.helper; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		4C3CE32F2F8DF5A7005E0D10 /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */ = {
+		4CB7B8272F9E656200CF14FD /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
 			);
 			target = 1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */;
 		};
-		4C3CE3A42F8DF5AA005E0D10 /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */ = {
+		4CB7B89E2F9E656500CF14FD /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Coordination/HelperProtocol.swift,
@@ -47,28 +54,28 @@
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */ = {
+		4CB7B80C2F9E655F00CF14FD /* LaunchAudit */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = LaunchAudit;
 			sourceTree = "<group>";
 		};
-		4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */ = {
+		4CB7B8222F9E656200CF14FD /* LaunchAuditHelper */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				4C3CE32F2F8DF5A7005E0D10 /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */,
+				4CB7B8272F9E656200CF14FD /* Exceptions for "LaunchAuditHelper" folder in "LaunchAuditHelper" target */,
 			);
 			path = LaunchAuditHelper;
 			sourceTree = "<group>";
 		};
-		4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */ = {
+		4CB7B8652F9E656500CF14FD /* LaunchAuditKit */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				4C3CE3A42F8DF5AA005E0D10 /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */,
+				4CB7B89E2F9E656500CF14FD /* Exceptions for "LaunchAuditKit" folder in "LaunchAuditHelper" target */,
 			);
 			path = LaunchAuditKit;
 			sourceTree = "<group>";
 		};
-		4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */ = {
+		4CB7B8AE2F9E656700CF14FD /* LaunchAuditTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = LaunchAuditTests;
 			sourceTree = "<group>";
@@ -100,10 +107,10 @@
 		7680B13F66DC00AACE54450F = {
 			isa = PBXGroup;
 			children = (
-				4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */,
-				4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */,
-				4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */,
-				4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */,
+				4CB7B80C2F9E655F00CF14FD /* LaunchAudit */,
+				4CB7B8222F9E656200CF14FD /* LaunchAuditHelper */,
+				4CB7B8652F9E656500CF14FD /* LaunchAuditKit */,
+				4CB7B8AE2F9E656700CF14FD /* LaunchAuditTests */,
 				437E879E3277C6CBB9E105A0 /* Frameworks */,
 				AC568269A1616BA2CF16D436 /* Products */,
 			);
@@ -113,7 +120,7 @@
 			isa = PBXGroup;
 			children = (
 				0D096B25F05451A2B95EDB59 /* LaunchAudit.app */,
-				D29DCA86758998FF33B283CA /* com.launchaudit.helper */,
+				D29DCA86758998FF33B283CA /* net.shmoopi.launchaudit.helper */,
 				A276C615667FABFAA7C187D7 /* LaunchAuditTests.xctest */,
 			);
 			name = Products;
@@ -127,16 +134,18 @@
 			buildConfigurationList = ED24596F9F14881D3AE823E2 /* Build configuration list for PBXNativeTarget "LaunchAudit" */;
 			buildPhases = (
 				5700D53E1B2BB3336D59C4F0 /* Sources */,
+				E3F3A118B49EB97D195598F1 /* Resources */,
 				FB4564FFAF7992C1231FF250 /* Frameworks */,
-				4C18A4652F8F330E002DDFA8 /* Resources */,
+				5AC78107505538D21BF50F29 /* Embed Privileged Helper */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				457A275F81F404A2AA74CE58 /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				4C3CE31A2F8DF5A4005E0D10 /* LaunchAudit */,
-				4C3CE36C2F8DF5AA005E0D10 /* LaunchAuditKit */,
+				4CB7B80C2F9E655F00CF14FD /* LaunchAudit */,
+				4CB7B8652F9E656500CF14FD /* LaunchAuditKit */,
 			);
 			name = LaunchAudit;
 			packageProductDependencies = (
@@ -157,13 +166,13 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				4C3CE32A2F8DF5A7005E0D10 /* LaunchAuditHelper */,
+				4CB7B8222F9E656200CF14FD /* LaunchAuditHelper */,
 			);
 			name = LaunchAuditHelper;
 			packageProductDependencies = (
 			);
 			productName = LaunchAuditHelper;
-			productReference = D29DCA86758998FF33B283CA /* com.launchaudit.helper */;
+			productReference = D29DCA86758998FF33B283CA /* net.shmoopi.launchaudit.helper */;
 			productType = "com.apple.product-type.tool";
 		};
 		33231B740F56E1DE61763D56 /* LaunchAuditTests */ = {
@@ -178,7 +187,7 @@
 				32E72E44D65F2727B23D541F /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
-				4C3CE3A92F8DF5AD005E0D10 /* LaunchAuditTests */,
+				4CB7B8AE2F9E656700CF14FD /* LaunchAuditTests */,
 			);
 			name = LaunchAuditTests;
 			packageProductDependencies = (
@@ -218,7 +227,7 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		4C18A4652F8F330E002DDFA8 /* Resources */ = {
+		E3F3A118B49EB97D195598F1 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -233,6 +242,28 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		5AC78107505538D21BF50F29 /* Embed Privileged Helper */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed Privileged Helper";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "set -euo pipefail\nHELPER_NAME=\"net.shmoopi.launchaudit.helper\"\nAPP_DIR=\"${BUILT_PRODUCTS_DIR}/${WRAPPER_NAME}\"\nDAEMONS_DIR=\"${APP_DIR}/Contents/Library/LaunchDaemons\"\nMACOS_DIR=\"${APP_DIR}/Contents/MacOS\"\n\nmkdir -p \"${DAEMONS_DIR}\"\ncp -f \"${SRCROOT}/LaunchAuditHelper/${HELPER_NAME}.plist\" \\\n      \"${DAEMONS_DIR}/${HELPER_NAME}.plist\"\n\n# The helper target's PRODUCT_NAME is the bundle ID, so its\n# built binary lives at BUILT_PRODUCTS_DIR/<HELPER_NAME>.\nif [ -f \"${BUILT_PRODUCTS_DIR}/${HELPER_NAME}\" ]; then\n  cp -f \"${BUILT_PRODUCTS_DIR}/${HELPER_NAME}\" \\\n        \"${MACOS_DIR}/${HELPER_NAME}\"\n  chmod +x \"${MACOS_DIR}/${HELPER_NAME}\"\nelse\n  echo \"warning: helper binary not found at ${BUILT_PRODUCTS_DIR}/${HELPER_NAME}\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		35C710F3E747A5D48487537C /* Sources */ = {
@@ -263,6 +294,11 @@
 			isa = PBXTargetDependency;
 			target = 1466D1346837F3615E930A09 /* LaunchAudit */;
 			targetProxy = 3A4856BB13431BA562F1D8AE /* PBXContainerItemProxy */;
+		};
+		457A275F81F404A2AA74CE58 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1DA1D8B185A92BDE5858250A /* LaunchAuditHelper */;
+			targetProxy = C47E0231B1155B87F736EA34 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -404,7 +440,7 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit.tests;
 				SDKROOT = macosx;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LaunchAudit.app/Contents/MacOS/LaunchAudit";
 			};
@@ -422,8 +458,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.helper;
-				PRODUCT_NAME = com.launchaudit.helper;
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit.helper;
+				PRODUCT_NAME = net.shmoopi.launchaudit.helper;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 			};
@@ -433,29 +469,23 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = LaunchAudit/LaunchAudit.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = Q2636DAEP4;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_GENERATION_MODE = GeneratedByXcode;
-				INFOPLIST_KEY_CFBundleDisplayName = "Launch Audit";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright 2026 Shmoopi LLC";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
-				OTHER_SWIFT_FLAGS = "";
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit;
 				PRODUCT_NAME = LaunchAudit;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_STRICT_CONCURRENCY = complete;
 			};
@@ -465,29 +495,23 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
 				CODE_SIGN_ENTITLEMENTS = LaunchAudit/LaunchAudit.entitlements;
-				CODE_SIGN_IDENTITY = "Apple Development";
-				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = Q2636DAEP4;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_GENERATION_MODE = GeneratedByXcode;
-				INFOPLIST_KEY_CFBundleDisplayName = "Launch Audit";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright 2026 Shmoopi LLC";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.0.0;
-				OTHER_SWIFT_FLAGS = "";
+				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit;
 				PRODUCT_NAME = LaunchAudit;
-				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
 				SWIFT_STRICT_CONCURRENCY = complete;
 			};
@@ -505,7 +529,7 @@
 					"@executable_path/../Frameworks",
 					"@loader_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.tests;
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit.tests;
 				SDKROOT = macosx;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/LaunchAudit.app/Contents/MacOS/LaunchAudit";
 			};
@@ -523,8 +547,8 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.launchaudit.helper;
-				PRODUCT_NAME = com.launchaudit.helper;
+				PRODUCT_BUNDLE_IDENTIFIER = net.shmoopi.launchaudit.helper;
+				PRODUCT_NAME = net.shmoopi.launchaudit.helper;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 			};

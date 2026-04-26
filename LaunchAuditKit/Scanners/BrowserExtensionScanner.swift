@@ -32,13 +32,13 @@ public struct BrowserExtensionScanner: PersistenceScanner {
     public init() {}
 
     public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
+        // Run Safari, Chromium, and Firefox scans concurrently.
+        // Each browser is independent — there's no reason to serialize them.
+        async let safari = Task.detached { self.scanSafari() }.value
+        async let chromium = Task.detached { self.scanChromiumBrowsers() }.value
+        async let firefox = Task.detached { self.scanFirefox() }.value
 
-        items.append(contentsOf: scanSafari())
-        items.append(contentsOf: scanChromiumBrowsers())
-        items.append(contentsOf: scanFirefox())
-
-        return items
+        return await safari + chromium + firefox
     }
 
     // MARK: - Safari
@@ -170,77 +170,101 @@ public struct BrowserExtensionScanner: PersistenceScanner {
             .init(name: "Vivaldi", basePath: "\(home)/Library/Application Support/Vivaldi"),
         ]
 
+        // Each browser's directory tree is independent — fan out across them.
+        // Manifest reads dominate the time on power-user machines.
+        let installedBrowsers = browsers.filter { PathUtilities.exists($0.basePath) }
+        guard !installedBrowsers.isEmpty else { return [] }
+
+        let count = installedBrowsers.count
+        // Sendable-safe shared buffer for results from concurrent workers.
+        let buffer = ConcurrentBuffer(count: count)
+        DispatchQueue.concurrentPerform(iterations: count) { i in
+            let items = self.scanOneChromiumBrowser(installedBrowsers[i])
+            buffer.set(i, items)
+        }
+        return buffer.flattened
+    }
+
+    /// Lock-protected fixed-capacity buffer for concurrentPerform results.
+    private final class ConcurrentBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var slots: [[PersistenceItem]]
+        init(count: Int) { self.slots = [[PersistenceItem]](repeating: [], count: count) }
+        func set(_ index: Int, _ items: [PersistenceItem]) {
+            lock.lock(); defer { lock.unlock() }
+            slots[index] = items
+        }
+        var flattened: [PersistenceItem] {
+            lock.lock(); defer { lock.unlock() }
+            return slots.flatMap { $0 }
+        }
+    }
+
+    private func scanOneChromiumBrowser(_ browser: ChromiumBrowser) -> [PersistenceItem] {
         var items: [PersistenceItem] = []
+        let profiles = discoverChromiumProfiles(basePath: browser.basePath)
 
-        for browser in browsers {
-            guard PathUtilities.exists(browser.basePath) else { continue }
+        for (profileName, profilePath) in profiles {
+            let extDir = (profilePath as NSString).appendingPathComponent("Extensions")
+            guard PathUtilities.exists(extDir) else { continue }
 
-            // Discover all profiles (Default, Profile 1, Profile 2, etc.)
-            let profiles = discoverChromiumProfiles(basePath: browser.basePath)
+            // Load Preferences once per profile for enabled/disabled state.
+            let disabledExtIDs = chromiumDisabledExtensions(profilePath: profilePath)
+            let extensionDirs = PathUtilities.listDirectories(in: extDir)
 
-            for (profileName, profilePath) in profiles {
-                let extDir = (profilePath as NSString).appendingPathComponent("Extensions")
-                guard PathUtilities.exists(extDir) else { continue }
+            for extPath in extensionDirs {
+                let extID = (extPath as NSString).lastPathComponent
+                if extID == "Temp" { continue }
 
-                // Load Preferences for enabled/disabled state
-                let disabledExtIDs = chromiumDisabledExtensions(profilePath: profilePath)
+                let timestamps = PathUtilities.timestamps(for: extPath)
+                let manifest = readChromiumManifest(extensionPath: extPath)
 
-                let extensionDirs = PathUtilities.listDirectories(in: extDir)
-                for extPath in extensionDirs {
-                    let extID = (extPath as NSString).lastPathComponent
-                    // Skip the Temp directory Chrome uses internally
-                    if extID == "Temp" { continue }
+                let name = manifest.name ?? extID
+                let isEnabled = !disabledExtIDs.contains(extID)
 
-                    let timestamps = PathUtilities.timestamps(for: extPath)
-                    let manifest = readChromiumManifest(extensionPath: extPath)
-
-                    let name = manifest.name ?? extID
-                    let isEnabled = !disabledExtIDs.contains(extID)
-
-                    var meta: [String: PlistValue] = [
-                        "Browser": .string(browser.name),
-                        "ExtensionID": .string(extID),
-                    ]
-                    if profiles.count > 1 {
-                        meta["Profile"] = .string(profileName)
-                    }
-                    if let version = manifest.version {
-                        meta["Version"] = .string(version)
-                    }
-                    if let desc = manifest.description {
-                        meta["Description"] = .string(desc)
-                    }
-                    if let manifestVersion = manifest.manifestVersion {
-                        meta["ManifestVersion"] = .string("v\(manifestVersion)")
-                    }
-                    if !manifest.permissions.isEmpty {
-                        meta["Permissions"] = .string(manifest.permissions.joined(separator: ", "))
-                    }
-                    if !manifest.hostPermissions.isEmpty {
-                        meta["HostPermissions"] = .string(manifest.hostPermissions.joined(separator: ", "))
-                    }
-                    if manifest.hasBackground {
-                        meta["Background"] = .string("Yes")
-                    }
-                    if !manifest.contentScriptMatches.isEmpty {
-                        meta["ContentScriptMatches"] = .string(manifest.contentScriptMatches.joined(separator: ", "))
-                    }
-
-                    let profileSuffix = profiles.count > 1 ? " [\(profileName)]" : ""
-                    let displayName = resolveChromiumName(name)
-
-                    items.append(PersistenceItem(
-                        category: category,
-                        name: "\(browser.name): \(displayName)\(profileSuffix)",
-                        label: extID,
-                        configPath: extPath,
-                        isEnabled: isEnabled,
-                        runContext: .onDemand,
-                        owner: .user(PathUtilities.currentUser),
-                        timestamps: timestamps,
-                        rawMetadata: meta
-                    ))
+                var meta: [String: PlistValue] = [
+                    "Browser": .string(browser.name),
+                    "ExtensionID": .string(extID),
+                ]
+                if profiles.count > 1 {
+                    meta["Profile"] = .string(profileName)
                 }
+                if let version = manifest.version {
+                    meta["Version"] = .string(version)
+                }
+                if let desc = manifest.description {
+                    meta["Description"] = .string(desc)
+                }
+                if let manifestVersion = manifest.manifestVersion {
+                    meta["ManifestVersion"] = .string("v\(manifestVersion)")
+                }
+                if !manifest.permissions.isEmpty {
+                    meta["Permissions"] = .string(manifest.permissions.joined(separator: ", "))
+                }
+                if !manifest.hostPermissions.isEmpty {
+                    meta["HostPermissions"] = .string(manifest.hostPermissions.joined(separator: ", "))
+                }
+                if manifest.hasBackground {
+                    meta["Background"] = .string("Yes")
+                }
+                if !manifest.contentScriptMatches.isEmpty {
+                    meta["ContentScriptMatches"] = .string(manifest.contentScriptMatches.joined(separator: ", "))
+                }
+
+                let profileSuffix = profiles.count > 1 ? " [\(profileName)]" : ""
+                let displayName = resolveChromiumName(name)
+
+                items.append(PersistenceItem(
+                    category: category,
+                    name: "\(browser.name): \(displayName)\(profileSuffix)",
+                    label: extID,
+                    configPath: extPath,
+                    isEnabled: isEnabled,
+                    runContext: .onDemand,
+                    owner: .user(PathUtilities.currentUser),
+                    timestamps: timestamps,
+                    rawMetadata: meta
+                ))
             }
         }
 
@@ -309,11 +333,12 @@ public struct BrowserExtensionScanner: PersistenceScanner {
     private func readChromiumManifest(extensionPath: String) -> ChromiumManifest {
         var manifest = ChromiumManifest()
 
-        // Extensions have version subdirectories; pick the latest
+        // Extensions have version subdirectories; pick the latest in a single
+        // pass instead of an O(n log n) sort — only the max matters.
         let versionDirs = PathUtilities.listDirectories(in: extensionPath)
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-
-        guard let latestVersion = versionDirs.last else { return manifest }
+        guard let latestVersion = versionDirs.max(by: {
+            $0.localizedStandardCompare($1) == .orderedAscending
+        }) else { return manifest }
 
         let manifestPath = (latestVersion as NSString).appendingPathComponent("manifest.json")
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),

@@ -11,7 +11,7 @@ public actor PrivilegeBroker {
 
     /// Install the privileged helper if not already installed.
     public func installHelperIfNeeded() async throws {
-        let service = SMAppService.daemon(plistName: "com.launchaudit.helper.plist")
+        let service = SMAppService.daemon(plistName: "net.shmoopi.launchaudit.helper.plist")
         let status = service.status
 
         switch status {

@@ -21,8 +21,9 @@ public struct AuthPluginScanner: PersistenceScanner {
 
         // Also check which plugins are referenced in the authorization database
         var referencedPlugins = Set<String>()
-        if let output = await ProcessRunner.shared.tryShell(
-            "security authorizationdb read system.login.console 2>/dev/null"
+        if let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/security",
+            arguments: ["authorizationdb", "read", "system.login.console"]
         ) {
             // Parse for plugin references
             for line in output.components(separatedBy: "\n") {

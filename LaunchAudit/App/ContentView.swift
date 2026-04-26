@@ -39,13 +39,9 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
             VStack(spacing: 0) {
-                // Filter bar — lives inside the content area so it shifts
-                // left when the inspector opens.
                 filterBar
-
                 Divider()
 
-                // Main content
                 if showDashboard {
                     DashboardView(
                         selectedCategory: $selectedCategory,

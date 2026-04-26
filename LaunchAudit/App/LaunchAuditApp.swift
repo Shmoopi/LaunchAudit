@@ -1,6 +1,5 @@
 import SwiftUI
 
-@main
 struct LaunchAuditApp: App {
     @StateObject private var scanViewModel = ScanViewModel()
 

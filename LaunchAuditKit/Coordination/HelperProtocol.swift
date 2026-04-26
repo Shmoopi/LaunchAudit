@@ -44,8 +44,8 @@ import Foundation
 
 /// Shared constants for the XPC connection.
 public enum HelperConstants {
-    public static let machServiceName = "com.launchaudit.helper"
-    public static let helperBundleID = "com.launchaudit.helper"
+    public static let machServiceName = "net.shmoopi.launchaudit.helper"
+    public static let helperBundleID = "net.shmoopi.launchaudit.helper"
 
     /// Directories the helper is allowed to read from.
     /// Only includes paths that require elevated privileges.

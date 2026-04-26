@@ -38,6 +38,16 @@ struct DashboardView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // Privilege banner — shown inside the scroll content rather
+                // than above the ScrollView. Putting it above (as a sibling
+                // or via safeAreaInset) caused the ScrollView's content to
+                // be hidden behind it: contentOffset 0 was the natural top
+                // of the content, but that top was now occluded, so the
+                // user couldn't scroll further up to reveal it.
+                if viewModel.shouldShowPrivilegeBanner {
+                    PrivilegeBanner()
+                }
+
                 // Header
                 if let result = viewModel.lastResult {
                     HStack {

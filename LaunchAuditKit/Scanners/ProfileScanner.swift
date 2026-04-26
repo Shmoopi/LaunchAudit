@@ -11,16 +11,26 @@ public struct ProfileScanner: PersistenceScanner {
     public init() {}
 
     public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
-
-        // Use profiles command to list installed profiles
-        if let output = await ProcessRunner.shared.tryShell("profiles list -output stdout-xml 2>/dev/null") {
-            items.append(contentsOf: parseProfilesXML(output))
-        } else if let output = await ProcessRunner.shared.tryShell("profiles list 2>/dev/null") {
-            items.append(contentsOf: parseProfilesText(output))
+        // Single invocation — request XML, then route to the appropriate
+        // parser based on the actual output format. The previous code ran
+        // `profiles list` twice (once XML, once text fallback), doubling
+        // the cost on machines where XML wasn't honoured. Skip /bin/sh —
+        // direct exec is faster.
+        guard let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/profiles", arguments: ["list", "-output", "stdout-xml"]
+        ) else {
+            return []
         }
 
-        return items
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        // Route on the first non-whitespace bytes — `profiles` falls back
+        // to text on systems where the XML format isn't honoured.
+        if trimmed.hasPrefix("<?xml") || trimmed.hasPrefix("<plist") {
+            return parseProfilesXML(output)
+        }
+        return parseProfilesText(output)
     }
 
     private func parseProfilesXML(_ xml: String) -> [PersistenceItem] {

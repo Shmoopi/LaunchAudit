@@ -18,7 +18,7 @@ public struct CronScanner: PersistenceScanner {
         var items: [PersistenceItem] = []
 
         // Current user's crontab
-        if let output = await ProcessRunner.shared.tryShell("crontab -l 2>/dev/null") {
+        if let output = await ProcessRunner.shared.tryRun("/usr/bin/crontab", arguments: ["-l"]) {
             let entries = parseCrontab(output, owner: .user(PathUtilities.currentUser))
             items.append(contentsOf: entries)
         }
