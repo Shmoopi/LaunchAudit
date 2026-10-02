@@ -24,7 +24,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit
         INFOPLIST_GENERATION_MODE: GeneratedByXcode
         PRODUCT_NAME: LaunchAudit
-        MARKETING_VERSION: "1.1.0"
+        MARKETING_VERSION: "1.2.0"
         CURRENT_PROJECT_VERSION: "1"
         ENABLE_HARDENED_RUNTIME: YES
         CODE_SIGN_ENTITLEMENTS: LaunchAudit/LaunchAudit.entitlements
@@ -65,7 +65,11 @@ targets:
                   "${MACOS_DIR}/${HELPER_NAME}"
             chmod +x "${MACOS_DIR}/${HELPER_NAME}"
           else
-            echo "warning: helper binary not found at ${BUILT_PRODUCTS_DIR}/${HELPER_NAME}"
+            # Fail the build. Warning-and-continuing shipped an app whose
+            # LaunchDaemons plist referenced a BundleProgram that did not exist,
+            # so helper registration failed at runtime with no build-time signal.
+            echo "error: helper binary not found at ${BUILT_PRODUCTS_DIR}/${HELPER_NAME}"
+            exit 1
           fi
 
   LaunchAuditHelper:
@@ -74,6 +78,11 @@ targets:
     sources:
       - path: LaunchAuditHelper
       - path: LaunchAuditKit/Coordination/HelperProtocol.swift
+      # Shared with the app rather than re-implemented. The helper previously had
+      # its own subprocess runner that deadlocked on any output over ~64KB, and its
+      # own unguarded file reads.
+      - path: LaunchAuditKit/Utilities/ProcessRunner.swift
+      - path: LaunchAuditKit/Utilities/SafeRead.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.shmoopi.launchaudit.helper

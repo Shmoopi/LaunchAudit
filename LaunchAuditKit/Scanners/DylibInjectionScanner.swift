@@ -13,7 +13,7 @@ public struct DylibInjectionScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         var items: [PersistenceItem] = []
 
         // Check /etc/launchd.conf (deprecated but still worth checking)
@@ -64,9 +64,14 @@ public struct DylibInjectionScanner: PersistenceScanner {
             var metadata: [String: PlistValue] = ["Source": .string("environment.plist")]
             var riskReasons = ["Deprecated ~/.MacOSX/environment.plist exists"]
 
+            // Parse once. The previous code parsed this file here and *again* in
+            // `dict_has_dyld` to decide the risk level, so under a concurrent write
+            // the reported metadata could disagree with the verdict derived from it.
+            var hasDyld = false
             if let dict = try? PlistParser().parse(at: envPlist) {
-                metadata = PlistParser().toMetadata(dict)
+                metadata.merge(PlistParser().toMetadata(dict)) { _, new in new }
                 if dict["DYLD_INSERT_LIBRARIES"] != nil {
+                    hasDyld = true
                     riskReasons.append("Contains DYLD_INSERT_LIBRARIES")
                 }
             }
@@ -78,7 +83,7 @@ public struct DylibInjectionScanner: PersistenceScanner {
                 isEnabled: true,
                 runContext: .login,
                 owner: .user(PathUtilities.currentUser),
-                riskLevel: dict_has_dyld(envPlist) ? .critical : .medium,
+                riskLevel: hasDyld ? .critical : .medium,
                 riskReasons: riskReasons,
                 timestamps: timestamps,
                 rawMetadata: metadata
@@ -103,31 +108,55 @@ public struct DylibInjectionScanner: PersistenceScanner {
                 let label = dict["Label"] as? String ?? (plistPath as NSString).lastPathComponent
                 let timestamps = PathUtilities.timestamps(for: plistPath)
 
+                // DYLD_INSERT_LIBRARIES is colon-separated. Storing the raw value
+                // as `executablePath` meant a two-dylib value failed the existence
+                // check, produced a bogus "orphaned" reason, and left both
+                // libraries unverified.
+                let dylibs = dyldValue
+                    .components(separatedBy: ":")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty }
+
+                // Derive from the plist's own location instead of hardcoding
+                // root-at-boot, which mislabelled every ~/Library/LaunchAgents hit.
+                let isDaemon = dir.hasSuffix("LaunchDaemons")
+                let owner: ItemOwner = {
+                    for (user, home) in PathUtilities.scannableHomeDirectories()
+                    where plistPath.hasPrefix(home) {
+                        return .user(user)
+                    }
+                    return .system
+                }()
+
+                var reasons = ["DYLD_INSERT_LIBRARIES found in launchd plist"]
+                for dylib in dylibs {
+                    reasons.append("Injected library: \(dylib)")
+                    if !PathUtilities.exists(dylib) {
+                        reasons.append("Injected library is missing from disk: \(dylib)")
+                    }
+                }
+
                 items.append(PersistenceItem(
                     category: category,
                     name: "DYLD injection in: \(label)",
                     label: label,
                     configPath: plistPath,
-                    executablePath: dyldValue,
-                    isEnabled: true,
-                    runContext: .boot,
-                    owner: .system,
+                    executablePath: dylibs.first,
+                    arguments: dylibs,
+                    isEnabled: !(dict["Disabled"] as? Bool ?? false),
+                    runContext: isDaemon ? .boot : .login,
+                    owner: owner,
                     riskLevel: .critical,
-                    riskReasons: [
-                        "DYLD_INSERT_LIBRARIES found in launchd plist",
-                        "Injected library: \(dyldValue)"
-                    ],
+                    riskReasons: reasons,
                     timestamps: timestamps,
-                    rawMetadata: ["DYLD_INSERT_LIBRARIES": .string(dyldValue)]
+                    rawMetadata: [
+                        "DYLD_INSERT_LIBRARIES": .string(dyldValue),
+                        "InjectedLibraries": .array(dylibs.map { .string($0) }),
+                    ]
                 ))
             }
         }
 
-        return items
-    }
-
-    private func dict_has_dyld(_ path: String) -> Bool {
-        guard let dict = try? PlistParser().parse(at: path) else { return false }
-        return dict["DYLD_INSERT_LIBRARIES"] != nil
+        return ScanOutcome(items: items)
     }
 }

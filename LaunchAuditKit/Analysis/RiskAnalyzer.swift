@@ -9,50 +9,68 @@ public struct RiskAnalyzer: Sendable {
     /// Analyze a persistence item and assign a risk level with reasons.
     ///
     /// Risk classification is delegated to ``RiskClassifier``, which evaluates
-    /// signing trust, mechanism severity, execution context, location, temporal
-    /// signals, and content signals as independent dimensions. This method then
-    /// handles source attribution from signing info.
+    /// signing trust, mechanism severity, execution context, location, temporal,
+    /// content, interpreter and entitlement signals as independent dimensions.
+    /// This method then handles source attribution from signing info.
     public func analyze(_ item: PersistenceItem) -> PersistenceItem {
-        // Delegate risk classification to the multi-dimensional classifier
-        let (riskLevel, reasons) = classifier.classify(item)
-
         var result = item
-        result.riskLevel = riskLevel
-        result.riskReasons = reasons
 
-        // Determine source from signing info — this is the authoritative signal.
-        if let signing = item.signingInfo {
-            if signing.isAppleSigned {
-                result = withSource(result, .apple)
-            } else if signing.isSigned {
-                // Signed but NOT Apple-signed — always treat as third-party,
-                // even if the scanner guessed .apple from path/label.
-                let developerName = extractDeveloperName(from: signing)
-                if let name = developerName {
-                    result = withSource(result, .thirdParty(name))
-                } else if let team = signing.teamIdentifier {
-                    result = withSource(result, .thirdParty(team))
-                } else {
-                    result = withSource(result, .unknown)
-                }
-            }
-            // If unsigned, leave the scanner-provided source (e.g. .apple
-            // for sealed system volume scripts that aren't Mach-O binaries).
-        } else if case .unknown = result.source {
-            // No signing info and source is unknown — use label heuristic
-            // as a fallback (e.g. orphaned plists where the binary is gone).
-            if let label = item.label {
-                if Self.isKnownAppleLabel(label) {
-                    result = withSource(result, .apple)
-                }
-            }
-        }
+        // Source attribution happens *before* classification so the classifier
+        // sees the authoritative source.
+        result.source = resolveSource(for: item)
 
+        let assessment = classifier.classify(result)
+        result.riskLevel = assessment.level
+        result.riskReasons = assessment.reasons
+        result.riskMitigations = assessment.mitigations
         return result
     }
 
+    /// Determine who provided this item.
+    ///
+    /// The code signature is the only authoritative signal. A bundle identifier or
+    /// launchd label is chosen by whoever wrote the file, so it can claim
+    /// `com.apple.*` freely — it is used only as a last resort for items that have
+    /// no binary to verify, and never to conclude "Apple" for something that has a
+    /// signature saying otherwise.
+    private func resolveSource(for item: PersistenceItem) -> ItemSource {
+        if let signing = item.signingInfo, signing.isSigned {
+            if signing.isAppleSigned {
+                // An Apple-signed interpreter running a third party's script is
+                // not Apple's software.
+                return item.isInterpreterFronted ? .unknown : .apple
+            }
+            if let name = extractDeveloperName(from: signing) {
+                return .thirdParty(name)
+            }
+            if let team = signing.teamIdentifier {
+                return .thirdParty(team)
+            }
+            return .unknown
+        }
+
+        // Unsigned, or nothing to verify. Content on the sealed system volume is
+        // Apple's by construction — SIP protects it and there is no separate
+        // executable to check.
+        if let config = item.configPath, PathUtilities.isAppleOwnedPath(config) {
+            return .apple
+        }
+
+        // Keep an explicit `.apple` a scanner set from a protected path, but never
+        // upgrade `.unknown` to `.apple` on the strength of a label alone.
+        if case .apple = item.source, item.signingInfo == nil,
+           let config = item.configPath, PathUtilities.isAppleOwnedPath(config) {
+            return .apple
+        }
+
+        if case .thirdParty = item.source { return item.source }
+        return .unknown
+    }
+
     /// Check if a label matches known Apple-deployed patterns.
-    /// Used as a fallback when code signing verification is unavailable.
+    ///
+    /// Retained for display grouping only. This must not be used to decide trust:
+    /// a label is attacker-chosen. See `resolveSource`.
     static func isKnownAppleLabel(_ label: String) -> Bool {
         let prefixes = [
             "com.apple.", "org.cups.", "org.apache.httpd",
@@ -68,7 +86,10 @@ public struct RiskAnalyzer: Sendable {
     /// Extract a human-readable developer name from the signing certificate chain.
     /// The leaf certificate (first in the chain) is typically
     /// "Developer ID Application: Company Name (TEAMID)" — extract just the company name.
-    private func extractDeveloperName(from signing: SigningInfo) -> String? {
+    ///
+    /// Display only. The certificate subject is chosen by the issuer, so this
+    /// string never participates in a trust decision.
+    func extractDeveloperName(from signing: SigningInfo) -> String? {
         guard let leaf = signing.signingAuthority.first else { return nil }
 
         // "Developer ID Application: Company Name (TEAMID)"
@@ -84,26 +105,5 @@ public struct RiskAnalyzer: Sendable {
         }
 
         return nil
-    }
-
-    private func withSource(_ item: PersistenceItem, _ source: ItemSource) -> PersistenceItem {
-        PersistenceItem(
-            id: item.id,
-            category: item.category,
-            name: item.name,
-            label: item.label,
-            configPath: item.configPath,
-            executablePath: item.executablePath,
-            arguments: item.arguments,
-            isEnabled: item.isEnabled,
-            runContext: item.runContext,
-            owner: item.owner,
-            signingInfo: item.signingInfo,
-            riskLevel: item.riskLevel,
-            riskReasons: item.riskReasons,
-            source: source,
-            timestamps: item.timestamps,
-            rawMetadata: item.rawMetadata
-        )
     }
 }

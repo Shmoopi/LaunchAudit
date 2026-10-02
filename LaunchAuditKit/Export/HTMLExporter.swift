@@ -1,155 +1,656 @@
 import Foundation
 
+/// Renders a self-contained HTML report.
+///
+/// Every interpolated runtime value goes through `escapeHTML`. That includes
+/// `hostname` and `osVersion`, which previously did not: they are reachable with
+/// fully attacker-controlled content through `launchaudit export tampered.json
+/// --format html`, which decodes an arbitrary JSON file and re-renders it.
+///
+/// The report is one table of every item with a filter bar. Filtering needs a
+/// script, so the Content Security Policy admits exactly one inline script by a
+/// per-report nonce and nothing else: no external requests, no other scripts.
+/// The script never builds markup from scan data; it only reads `data-`
+/// attributes (escaped like everything else) and toggles rows, so an escaping
+/// slip still cannot become script execution. Without scripts the filter bar
+/// stays hidden and the full table is shown, which is also what prints.
 public struct HTMLExporter: Sendable {
 
     public init() {}
 
     public func export(_ result: ScanResult) -> String {
-        let criticalItems = result.items.filter { $0.riskLevel == .critical }
-        let highItems = result.items.filter { $0.riskLevel == .high }
-        let mediumItems = result.items.filter { $0.riskLevel == .medium }
-        let lowItems = result.items.filter { $0.riskLevel == .low }
-        let infoItems = result.items.filter { $0.riskLevel == .informational }
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let counts = Dictionary(grouping: result.items, by: \.riskLevel).mapValues(\.count)
+        let rows = result.items.sorted {
+            $0.riskLevel != $1.riskLevel
+                ? $0.riskLevel > $1.riskLevel
+                : $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
 
         return """
         <!DOCTYPE html>
         <html lang="en">
         <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>LaunchAudit Report — \(result.hostname)</title>
-            <style>
-                * { box-sizing: border-box; margin: 0; padding: 0; }
-                body { font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', system-ui, sans-serif;
-                       line-height: 1.5; color: #1d1d1f; background: #f5f5f7; padding: 24px; }
-                .container { max-width: 1200px; margin: 0 auto; }
-                h1 { font-size: 28px; margin-bottom: 4px; }
-                h2 { font-size: 20px; margin: 24px 0 12px; border-bottom: 1px solid #d2d2d7; padding-bottom: 4px; }
-                .meta { color: #86868b; font-size: 14px; margin-bottom: 24px; }
-                .summary { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 24px; }
-                .card { background: white; border-radius: 12px; padding: 16px; text-align: center;
-                        box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-                .card .num { font-size: 32px; font-weight: 700; }
-                .card .label { font-size: 12px; color: #86868b; text-transform: uppercase; }
-                .critical .num { color: #ff3b30; }
-                .high .num { color: #ff9500; }
-                .medium .num { color: #ffcc00; }
-                .low .num { color: #34c759; }
-                table { width: 100%; border-collapse: collapse; background: white;
-                        border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-                        margin-bottom: 24px; }
-                th { background: #f5f5f7; text-align: left; padding: 8px 12px; font-size: 12px;
-                     text-transform: uppercase; color: #86868b; }
-                td { padding: 8px 12px; border-top: 1px solid #f0f0f0; font-size: 13px; }
-                tr:hover td { background: #fafafa; }
-                .badge { display: inline-block; padding: 2px 8px; border-radius: 10px;
-                         font-size: 11px; font-weight: 600; color: white; }
-                .badge-critical { background: #ff3b30; }
-                .badge-high { background: #ff9500; }
-                .badge-medium { background: #ffcc00; color: #1d1d1f; }
-                .badge-low { background: #34c759; }
-                .badge-informational { background: #86868b; }
-                .mono { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
-                .section { margin-bottom: 32px; }
-                details { background: white; border-radius: 12px; padding: 12px 16px;
-                          box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 8px; }
-                summary { cursor: pointer; font-weight: 600; }
-                footer { text-align: center; color: #86868b; font-size: 12px; margin-top: 48px; }
-            </style>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-\(nonce)'">
+        <title>LaunchAudit Report — \(escapeHTML(result.hostname))</title>
+        <style>\(Self.stylesheet)</style>
         </head>
         <body>
-        <div class="container">
+        <main class="container">
+        <header class="report-header">
             <h1>LaunchAudit Report</h1>
             <p class="meta">
-                \(result.hostname) &middot;
-                \(result.osVersion) &middot;
-                Scanned \(result.scanDate.formatted()) &middot;
-                \(result.items.count) items in \(String(format: "%.1f", result.scanDuration))s
+                <strong>\(escapeHTML(result.hostname))</strong> · \(escapeHTML(result.osVersion))
+                · Scanned \(escapeHTML(result.scanDate.formatted(date: .abbreviated, time: .shortened)))
+                in \(String(format: "%.1f", result.scanDuration))s
+                · \(result.ranAsRoot ? "with root privileges" : "without root privileges")
+                · LaunchAudit \(escapeHTML(result.toolVersion)), schema v\(result.schemaVersion)
             </p>
+        </header>
 
-            <div class="summary">
-                <div class="card"><div class="num">\(result.items.count)</div><div class="label">Total Items</div></div>
-                <div class="card critical"><div class="num">\(criticalItems.count)</div><div class="label">Critical</div></div>
-                <div class="card high"><div class="num">\(highItems.count)</div><div class="label">High</div></div>
-                <div class="card medium"><div class="num">\(mediumItems.count)</div><div class="label">Medium</div></div>
-                <div class="card low"><div class="num">\(lowItems.count + infoItems.count)</div><div class="label">Low / Info</div></div>
-            </div>
+        \(summaryCards(total: result.items.count, counts: counts))
 
-        \(attentionSection(critical: criticalItems, high: highItems))
+        \(coverageSection(result))
 
-        \(categoryTables(result))
+        \(filterBar(result.items))
 
-            <footer>
-                Generated by LaunchAudit &middot; \(result.scanDate.formatted())
-            </footer>
-        </div>
+        <p class="filter-summary" id="filter-summary" hidden></p>
+
+        \(itemsTable(rows))
+
+        \(legendSection())
+
+        <footer>Generated by LaunchAudit \(escapeHTML(result.toolVersion))</footer>
+        </main>
+        <script nonce="\(nonce)">\(Self.script)</script>
         </body>
         </html>
         """
     }
 
-    private func attentionSection(critical: [PersistenceItem], high: [PersistenceItem]) -> String {
-        let items = critical + high
-        guard !items.isEmpty else { return "" }
+    // MARK: - Summary
 
-        var html = "<h2>Attention Required</h2>\n<table>\n"
-        html += "<tr><th>Risk</th><th>Name</th><th>Category</th><th>Reason</th></tr>\n"
-        for item in items {
-            let badgeClass = "badge-\(item.riskLevel.rawValue)"
-            let reason = item.riskReasons.first ?? ""
+    /// Totals per risk level. Each card is also a one-click risk filter.
+    private func summaryCards(total: Int, counts: [RiskLevel: Int]) -> String {
+        var html = "<div class=\"summary\">\n"
+        html += """
+            <button type="button" class="card" data-risk-filter="">\
+        <span class="num">\(total)</span><span class="label">Total</span></button>
+
+        """
+        for level in RiskLevel.allCases.reversed() {
+            let count = counts[level] ?? 0
             html += """
-            <tr>
-                <td><span class="badge \(badgeClass)">\(item.riskLevel.displayName)</span></td>
-                <td>\(escapeHTML(item.name))</td>
-                <td>\(item.category.displayName)</td>
-                <td>\(escapeHTML(reason))</td>
-            </tr>
+                <button type="button" class="card card-\(level.rawValue)\(count == 0 ? " card-zero" : "")" \
+            data-risk-filter="eq:\(level.sortOrder)">\
+            <span class="num">\(count)</span><span class="label">\(level.displayName)</span></button>
 
             """
         }
-        html += "</table>\n"
-        return html
+        return html + "</div>\n"
     }
 
-    private func categoryTables(_ result: ScanResult) -> String {
-        var html = "<h2>All Items by Category</h2>\n"
-        let grouped = Dictionary(grouping: result.items, by: \.category)
+    /// What this scan could *not* see.
+    ///
+    /// Without this a filtered or unprivileged scan is indistinguishable from a full
+    /// clean one, and "Total Items: 12" reads as "this machine has 12 persistence
+    /// items".
+    private func coverageSection(_ result: ScanResult) -> String {
+        var notes: [String] = []
 
-        for category in PersistenceCategory.allCases {
-            guard let items = grouped[category], !items.isEmpty else { continue }
+        if !result.ranAsRoot {
+            notes.append(
+                "Run without root privileges — categories requiring elevation were "
+                + "skipped. Re-run with <code>sudo launchaudit scan</code> for full coverage."
+            )
+        }
+        if !result.hadAuthoritativeLaunchdState {
+            notes.append(
+                "launchd's override database could not be read, so Enabled/Disabled "
+                + "reflects each item's plist rather than what launchd will actually run."
+            )
+        }
+        if !result.appliedFilters.isEmpty {
+            notes.append(
+                "Filters were applied when exporting, so this is a subset of what was found: "
+                + escapeHTML(result.appliedFilters.joined(separator: "; "))
+            )
+        }
+        if result.scannedCategories.count < PersistenceCategory.allCases.count {
+            notes.append(
+                "\(result.scannedCategories.count) of "
+                + "\(PersistenceCategory.allCases.count) categories were scanned."
+            )
+        }
+        for error in result.errors {
+            let scope = error.category?.displayName ?? "Scan"
+            let label = error.isPermissionDenied ? "permission denied" : "error"
+            notes.append(
+                "<strong>\(escapeHTML(scope))</strong> (\(label)): " + escapeHTML(error.message)
+            )
+        }
 
-            html += """
-            <details>
-                <summary>\(category.displayName) (\(items.count))</summary>
-                <table>
-                <tr><th>Risk</th><th>Name</th><th>Status</th><th>Signed</th><th>Path</th></tr>
+        guard !notes.isEmpty else { return "" }
 
-            """
-            for item in items.sorted(by: { $0.riskLevel > $1.riskLevel }) {
-                let badgeClass = "badge-\(item.riskLevel.rawValue)"
-                let signed = item.signingInfo?.isSigned == true ? "Yes" : (item.signingInfo != nil ? "No" : "--")
-                let path = item.configPath ?? item.executablePath ?? ""
-                html += """
-                <tr>
-                    <td><span class="badge \(badgeClass)">\(item.riskLevel.displayName)</span></td>
-                    <td>\(escapeHTML(item.name))</td>
-                    <td>\(item.isEnabled ? "Enabled" : "Disabled")</td>
-                    <td>\(signed)</td>
-                    <td class="mono">\(escapeHTML(path))</td>
-                </tr>
+        var html = "<section class=\"coverage\">\n<h2>Scan coverage</h2>\n"
+        html += "<p>Some results may be incomplete:</p>\n<ul>\n"
+        for note in notes { html += "<li>\(note)</li>\n" }
+        return html + "</ul>\n</section>\n"
+    }
 
-                """
+    // MARK: - Filters
+
+    /// Hidden until the script runs, so a reader without scripts (or a printout)
+    /// never sees controls that do nothing.
+    private func filterBar(_ items: [PersistenceItem]) -> String {
+        let presentCategories = Set(items.map(\.category))
+        var categoryOptions = "<option value=\"\">All categories</option>\n"
+        for group in CategoryGroup.allCases {
+            let categories = group.categories.filter(presentCategories.contains)
+            guard !categories.isEmpty else { continue }
+            let groupCount = items.filter { $0.category.group == group }.count
+            categoryOptions += "<optgroup label=\"\(escapeHTML(group.rawValue))\">\n"
+            categoryOptions += "<option value=\"g:\(escapeHTML(group.rawValue))\">"
+                + "All \(escapeHTML(group.rawValue)) (\(groupCount))</option>\n"
+            for category in categories {
+                let count = items.filter { $0.category == category }.count
+                categoryOptions += "<option value=\"c:\(category.rawValue)\">"
+                    + "\(escapeHTML(category.displayName)) (\(count))</option>\n"
             }
-            html += "</table>\n</details>\n"
+            categoryOptions += "</optgroup>\n"
         }
 
+        var riskOptions = "<option value=\"\">Any risk</option>\n"
+        riskOptions += "<option value=\"min:\(RiskLevel.high.sortOrder)\">High and above</option>\n"
+        riskOptions += "<option value=\"min:\(RiskLevel.medium.sortOrder)\">Medium and above</option>\n"
+        for level in RiskLevel.allCases.reversed() {
+            riskOptions += "<option value=\"eq:\(level.sortOrder)\">\(level.displayName) only</option>\n"
+        }
+
+        var signatureOptions = "<option value=\"\">Any signature</option>\n"
+        for state in SignatureState.allCases {
+            signatureOptions += "<option value=\"\(state.rawValue)\">\(state.label)</option>\n"
+        }
+
+        return """
+        <div class="filters" id="filters" hidden>
+            <input type="search" id="f-search" placeholder="Search name, label, path, developer, finding…" aria-label="Search items" autocomplete="off">
+            <select id="f-risk" aria-label="Risk">\(riskOptions)</select>
+            <select id="f-category" aria-label="Category">\(categoryOptions)</select>
+            <select id="f-signature" aria-label="Signature">\(signatureOptions)</select>
+            <select id="f-status" aria-label="Status">
+                <option value="">Enabled or disabled</option>
+                <option value="enabled">Enabled</option>
+                <option value="disabled">Disabled</option>
+            </select>
+            <label class="check"><input type="checkbox" id="f-hide-apple"> Hide Apple system items</label>
+            <label class="check"><input type="checkbox" id="f-third-party"> Third-party only</label>
+            <span class="count" id="f-count" aria-live="polite"></span>
+            <button type="button" id="f-reset">Reset</button>
+        </div>
+        """
+    }
+
+    // MARK: - Table
+
+    private func itemsTable(_ items: [PersistenceItem]) -> String {
+        var html = """
+        <div class="table-wrap">
+        <table id="items">
+        <thead><tr>
+            <th scope="col" aria-sort="descending"><button type="button" data-sort="risk">Risk</button></th>
+            <th scope="col"><button type="button" data-sort="name">Item &amp; findings</button></th>
+            <th scope="col"><button type="button" data-sort="category">Category</button></th>
+            <th scope="col"><button type="button" data-sort="status">Status</button></th>
+            <th scope="col"><button type="button" data-sort="signature">Signature</button></th>
+            <th scope="col"><button type="button" data-sort="developer">Developer</button></th>
+            <th scope="col"><button type="button" data-sort="path">Path</button></th>
+        </tr></thead>
+        <tbody>
+
+        """
+        for item in items {
+            html += row(for: item)
+        }
+        html += """
+        <tr id="empty" class="empty" hidden><td colspan="7">No items match the current filters.</td></tr>
+        </tbody>
+        </table>
+        </div>
+
+        """
+        if items.isEmpty {
+            html += "<p class=\"none\">No persistence items were found.</p>\n"
+        }
         return html
     }
 
-    private func escapeHTML(_ text: String) -> String {
+    private func row(for item: PersistenceItem) -> String {
+        let signature = SignatureState(item.signingInfo)
+        let path = item.configPath ?? item.executablePath ?? ""
+        let developer = item.source.displayName
+        // Mirrors the app's "Hide Apple System Items": never hides High or Critical.
+        let isHideableApple = item.isVerifiedAppleSoftware && item.riskLevel < .high
+
+        let searchText = (
+            [item.name, item.label, item.configPath, item.executablePath, developer,
+             item.category.displayName, item.category.group.rawValue]
+                .compactMap { $0 }
+                + item.riskReasons + item.riskMitigations
+        ).joined(separator: " ").lowercased()
+
+        var details = "<div class=\"name\">\(escapeHTML(item.name))</div>"
+        if let label = item.label, label != item.name {
+            details += "<div class=\"sub mono\">\(escapeHTML(label))</div>"
+        }
+        if !item.riskReasons.isEmpty || !item.riskMitigations.isEmpty {
+            details += "<ul class=\"findings\">"
+            details += item.riskReasons
+                .map { "<li class=\"reason\">\(escapeHTML($0))</li>" }.joined()
+            details += item.riskMitigations
+                .map { "<li class=\"mitigation\">\(escapeHTML($0))</li>" }.joined()
+            details += "</ul>"
+        }
+        if item.riskLevel >= .high, let hint = item.category.investigationHint {
+            details += "<div class=\"hint\"><span>Investigate:</span> "
+                + "<code>\(escapeHTML(hint))</code></div>"
+        }
+
+        var pathCell = "<div class=\"mono\">\(escapeHTML(path))</div>"
+        if let exec = item.executablePath, exec != path {
+            pathCell += "<div class=\"sub\">Runs <span class=\"mono\">\(escapeHTML(exec))</span></div>"
+        }
+
+        let techniques = item.category.attackTechniques.joined(separator: ", ")
+        let categoryTitle = item.category.whatIsNormal
+            + (techniques.isEmpty ? "" : " (ATT&CK \(techniques))")
+
+        return """
+        <tr class="item" \
+        data-risk="\(item.riskLevel.sortOrder)" \
+        data-category="c:\(item.category.rawValue)" \
+        data-group="g:\(escapeHTML(item.category.group.rawValue))" \
+        data-signature="\(signature.rawValue)" \
+        data-signature-order="\(signature.sortOrder)" \
+        data-status="\(item.isEnabled ? "enabled" : "disabled")" \
+        data-apple="\(isHideableApple ? "1" : "0")" \
+        data-third-party="\(item.source.isApple ? "0" : "1")" \
+        data-name="\(escapeHTML(item.name.lowercased()))" \
+        data-category-name="\(escapeHTML(item.category.displayName))" \
+        data-developer="\(escapeHTML(developer))" \
+        data-path="\(escapeHTML(path))" \
+        data-search="\(escapeHTML(searchText))">
+            <td><span class="badge badge-\(item.riskLevel.rawValue)">\(item.riskLevel.displayName)</span></td>
+            <td class="details">\(details)</td>
+            <td title="\(escapeHTML(categoryTitle))">\(escapeHTML(item.category.displayName))</td>
+            <td><span class="status status-\(item.isEnabled ? "on" : "off")">\(item.isEnabled ? "Enabled" : "Disabled")</span></td>
+            <td><span class="sig sig-\(signature.rawValue)" title="\(signature.help)">\(signature.label)</span></td>
+            <td>\(escapeHTML(developer))</td>
+            <td class="path">\(pathCell)</td>
+        </tr>
+
+        """
+    }
+
+    /// Definitions, so a reader who did not run the scan can interpret it.
+    private func legendSection() -> String {
+        """
+        <section class="legend">
+        <h2>How to read this report</h2>
+        <p>Each row is something configured to run automatically on this Mac — at
+        boot, at login, on a schedule, or in response to an event. Risk is a
+        heuristic to guide triage, not a malware verdict. Hover a category for what
+        is normal there.</p>
+        <dl>
+            <dt><span class="badge badge-critical">Critical</span></dt><dd>Direct code-injection vector, or code in a world-writable location. Investigate first.</dd>
+            <dt><span class="badge badge-high">High</span></dt><dd>Unsigned, ad-hoc signed, or privileged code whose author cannot be established.</dd>
+            <dt><span class="badge badge-medium">Medium</span></dt><dd>Signed but not notarized, or a signature that could not be verified.</dd>
+            <dt><span class="badge badge-low">Low</span></dt><dd>Notarized software from an identifiable developer.</dd>
+            <dt><span class="badge badge-informational">Info</span></dt><dd>Apple-provided system components.</dd>
+            <dt><span class="sig sig-unverified">Not verified</span></dt><dd>No signature check was possible — this is not the same as unsigned.</dd>
+        </dl>
+        </section>
+        """
+    }
+
+    /// Escape for HTML text and attribute contexts.
+    ///
+    /// `&` must be replaced first, or the entities introduced by the later
+    /// replacements would themselves be double-escaped.
+    func escapeHTML(_ text: String) -> String {
         text.replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")
             .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
+            .replacingOccurrences(of: "`", with: "&#96;")
     }
+}
+
+// MARK: - Signature state
+
+/// The signature column, with the same states and wording as the app's table.
+private enum SignatureState: String, CaseIterable {
+    case apple, notarized, signed, adHoc = "adhoc", unsigned, unverified
+
+    init(_ info: SigningInfo?) {
+        guard let info else { self = .unverified; return }
+        if !info.isSigned { self = .unsigned }
+        else if info.isAppleSigned { self = .apple }
+        else if info.isNotarized { self = .notarized }
+        else if info.isAdHocSigned { self = .adHoc }
+        else { self = .signed }
+    }
+
+    var label: String {
+        switch self {
+        case .apple: return "Apple"
+        case .notarized: return "Notarized"
+        case .signed: return "Signed"
+        case .adHoc: return "Ad-hoc"
+        case .unsigned: return "Unsigned"
+        case .unverified: return "Not verified"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .apple: return "Signed by Apple as part of macOS."
+        case .notarized: return "Signed by an identified developer and notarized by Apple."
+        case .signed: return "Validly signed, but not notarized by Apple."
+        case .adHoc: return "Has a signature, but no developer identity behind it."
+        case .unsigned: return "No valid code signature."
+        case .unverified: return "The signature could not be checked; not the same as unsigned."
+        }
+    }
+
+    /// Most trustworthy last, so an ascending sort puts the worst first.
+    var sortOrder: Int {
+        switch self {
+        case .unsigned: return 0
+        case .adHoc: return 1
+        case .unverified: return 2
+        case .signed: return 3
+        case .notarized: return 4
+        case .apple: return 5
+        }
+    }
+}
+
+// MARK: - Static assets
+
+private extension HTMLExporter {
+    static let stylesheet = #"""
+    :root {
+        color-scheme: light dark;
+        --bg: #f5f5f7; --panel: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
+        --line: #e5e5ea; --head: #fafafc; --hover: #f2f6ff; --accent: #0a66d8;
+        --reason: #8a4b00; --mitigation: #2f6b35;
+        --critical: #b81c1c; --high: #a65400; --medium: #fdcc29; --medium-text: #2a1f00;
+        --low: #218033; --info: #5a5a5f;
+        --warn-bg: #fff8e1; --warn-line: #f0d98c;
+    }
+    /* Screen only: a dark palette on paper is near-white text on white. */
+    @media screen and (prefers-color-scheme: dark) {
+        :root {
+            --bg: #1c1c1e; --panel: #2c2c2e; --text: #f2f2f7; --muted: #a1a1a6;
+            --line: #3a3a3c; --head: #323234; --hover: #2f3644; --accent: #4c9aff;
+            --reason: #ffb35c; --mitigation: #7fd08a;
+            --warn-bg: #3a3220; --warn-line: #6b5a2a;
+        }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 24px; background: var(--bg); color: var(--text);
+           font: 14px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    h1 { font-size: 26px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 0 0 8px; }
+    .meta { color: var(--muted); margin: 0 0 20px; }
+    code, .mono { font-family: "SF Mono", Menlo, monospace; font-size: 12px; }
+    .mono { overflow-wrap: anywhere; }
+
+    .summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; margin-bottom: 20px; }
+    .card { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 12px 8px;
+            background: var(--panel); color: inherit; font: inherit; border: 2px solid transparent;
+            border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.08); cursor: default; }
+    .js .card { cursor: pointer; }
+    .js .card:hover { border-color: var(--line); }
+    .card[aria-pressed="true"] { border-color: var(--accent); }
+    .card .num { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .card .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .card-critical .num { color: var(--critical); } .card-high .num { color: var(--high); }
+    .card-medium .num { color: #b58a00; } .card-low .num { color: var(--low); }
+    .card-zero .num { color: var(--muted); }
+
+    .coverage { background: var(--warn-bg); border: 1px solid var(--warn-line); border-radius: 12px;
+                padding: 12px 16px; margin-bottom: 20px; }
+    .coverage p { margin: 0; }
+    .coverage ul { margin: 6px 0 0; padding-left: 20px; }
+
+    .filters { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; align-items: center;
+               gap: 8px; padding: 10px 12px; margin-bottom: 0; background: var(--panel);
+               border: 1px solid var(--line); border-bottom: none; border-radius: 12px 12px 0 0; }
+    .filters input[type="search"] { flex: 1 1 200px; min-width: 160px; }
+    .filters select { max-width: 190px; }
+    .filters input[type="search"], .filters select, .filters button {
+        font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line);
+        border-radius: 7px; padding: 5px 8px; }
+    .filters button { cursor: pointer; }
+    .filters .check { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+    .filters .count { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .filter-summary { color: var(--muted); margin: 8px 0; }
+
+    /* No overflow here on wide screens: a scrolling wrapper would make the
+       sticky header stick inside the table instead of under the filter bar. */
+    .table-wrap { background: var(--panel); border: 1px solid var(--line);
+                  border-radius: 12px; margin-bottom: 24px; }
+    .filters:not([hidden]) + .filter-summary + .table-wrap,
+    .filters:not([hidden]) + .filter-summary[hidden] + .table-wrap { border-radius: 0 0 12px 12px; }
+    table { width: 100%; border-collapse: collapse; }
+    thead th { position: sticky; top: var(--filters-height, 0px); z-index: 1; background: var(--head);
+               border-bottom: 1px solid var(--line); text-align: left; padding: 0; white-space: nowrap; }
+    th button { all: unset; display: block; padding: 8px 12px; font-size: 11px; font-weight: 600;
+                text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .js th button { cursor: pointer; }
+    th[aria-sort] button { color: var(--text); }
+    th[aria-sort="ascending"] button::after { content: " ▲"; }
+    th[aria-sort="descending"] button::after { content: " ▼"; }
+    td { padding: 9px 12px; border-top: 1px solid var(--line); vertical-align: top; }
+    tbody tr.item:first-child td { border-top: none; }
+    tbody tr.item:hover td { background: var(--hover); }
+    td.details { min-width: 260px; }
+    td.path { min-width: 220px; max-width: 420px; }
+    .name { font-weight: 600; overflow-wrap: anywhere; }
+    .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .findings { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12.5px; }
+    .findings li { padding-left: 16px; position: relative; }
+    .findings li::before { position: absolute; left: 0; }
+    .reason { color: var(--reason); } .reason::before { content: "▲"; font-size: 9px; top: 3px; }
+    .mitigation { color: var(--mitigation); } .mitigation::before { content: "✓"; }
+    .hint { margin-top: 6px; font-size: 12px; color: var(--muted); }
+    .hint code { color: var(--text); overflow-wrap: anywhere; }
+    .empty td { text-align: center; color: var(--muted); padding: 24px; }
+    .none { color: var(--muted); text-align: center; }
+
+    /* Contrast-checked pairings; white on #ffcc00 measures about 1.4:1. */
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+             font-weight: 600; color: #fff; white-space: nowrap; }
+    .badge-critical { background: var(--critical); } .badge-high { background: var(--high); }
+    .badge-medium { background: var(--medium); color: var(--medium-text); }
+    .badge-low { background: var(--low); } .badge-informational { background: var(--info); }
+    .status, .sig { white-space: nowrap; font-size: 12.5px; }
+    .status-off { color: var(--muted); }
+    .sig::before { display: inline-block; width: 1.1em; }
+    .sig-apple::before { content: ""; } .sig-notarized::before { content: "✓"; color: var(--low); }
+    .sig-signed::before { content: "•"; } .sig-adhoc::before { content: "?"; color: var(--high); }
+    .sig-unsigned::before { content: "✕"; color: var(--critical); }
+    .sig-unverified { color: var(--muted); } .sig-unverified::before { content: "–"; }
+
+    .legend { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+    .legend p { margin: 0 0 10px; color: var(--muted); }
+    .legend dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; margin: 0; }
+    .legend dt { text-align: right; } .legend dd { margin: 0; }
+    footer { text-align: center; color: var(--muted); font-size: 12px; margin-top: 32px; }
+
+    @media (max-width: 900px) {
+        body { padding: 12px; }
+        .summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .filters { position: static; }
+        .table-wrap { overflow-x: auto; }
+        thead th { position: static; }
+    }
+    @media print {
+        :root { color-scheme: light; }
+        body { background: #fff; padding: 0; font-size: 11px; }
+        .filters { display: none !important; }
+        .card, .table-wrap, .legend, .coverage { box-shadow: none; border: 1px solid #d2d2d7; }
+        .table-wrap { overflow: visible; border-radius: 0; }
+        thead th { position: static; }
+        tr, .legend { break-inside: avoid; }
+        tbody tr.item:hover td { background: none; }
+        .findings, .status, .sig, .hint, .sub, code, .mono { font-size: 10px; }
+    }
+    """#
+
+    /// Reads only `data-` attributes and form values; writes only `hidden`,
+    /// `textContent`, ARIA attributes and row order. It never creates markup
+    /// from scan data.
+    static let script = #"""
+    (function () {
+        "use strict";
+        var root = document.documentElement;
+        root.classList.add("js");
+
+        var bar = document.getElementById("filters");
+        var table = document.getElementById("items");
+        if (!bar || !table) { return; }
+        bar.hidden = false;
+
+        var tbody = table.tBodies[0];
+        var rows = Array.prototype.slice.call(tbody.querySelectorAll("tr.item"));
+        var empty = document.getElementById("empty");
+        var summary = document.getElementById("filter-summary");
+        var count = document.getElementById("f-count");
+        var search = document.getElementById("f-search");
+        var risk = document.getElementById("f-risk");
+        var category = document.getElementById("f-category");
+        var signature = document.getElementById("f-signature");
+        var status = document.getElementById("f-status");
+        var hideApple = document.getElementById("f-hide-apple");
+        var thirdParty = document.getElementById("f-third-party");
+        var cards = Array.prototype.slice.call(document.querySelectorAll("[data-risk-filter]"));
+        var selects = [risk, category, signature, status];
+
+        function riskMatches(value, level) {
+            if (!value) { return true; }
+            var parts = value.split(":");
+            var target = Number(parts[1]);
+            return parts[0] === "eq" ? level === target : level >= target;
+        }
+
+        function selectedText(select) {
+            return select.value ? select.options[select.selectedIndex].text : "";
+        }
+
+        function apply() {
+            var terms = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+            var shown = 0;
+            rows.forEach(function (row) {
+                var d = row.dataset;
+                var visible = riskMatches(risk.value, Number(d.risk))
+                    && (!category.value || d.category === category.value || d.group === category.value)
+                    && (!signature.value || d.signature === signature.value)
+                    && (!status.value || d.status === status.value)
+                    && !(hideApple.checked && d.apple === "1")
+                    && !(thirdParty.checked && d.thirdParty !== "1")
+                    && terms.every(function (t) { return d.search.indexOf(t) !== -1; });
+                row.hidden = !visible;
+                if (visible) { shown += 1; }
+            });
+
+            count.textContent = shown === rows.length
+                ? rows.length + (rows.length === 1 ? " item" : " items")
+                : shown + " of " + rows.length + " items";
+            empty.hidden = shown !== 0 || rows.length === 0;
+            cards.forEach(function (card) {
+                card.setAttribute("aria-pressed", String(card.dataset.riskFilter === risk.value));
+            });
+
+            var active = selects.map(selectedText).filter(Boolean);
+            if (search.value.trim()) { active.unshift("search \u201C" + search.value.trim() + "\u201D"); }
+            if (hideApple.checked) { active.push("Apple system items hidden"); }
+            if (thirdParty.checked) { active.push("third-party only"); }
+            summary.hidden = active.length === 0;
+            summary.textContent = active.length
+                ? "Showing " + shown + " of " + rows.length + " items \u2014 filtered by " + active.join(", ") + "."
+                : "";
+        }
+
+        [search, risk, category, signature, status, hideApple, thirdParty].forEach(function (control) {
+            control.addEventListener(control === search ? "input" : "change", apply);
+        });
+        cards.forEach(function (card) {
+            card.addEventListener("click", function () {
+                risk.value = risk.value === card.dataset.riskFilter ? "" : card.dataset.riskFilter;
+                apply();
+            });
+        });
+        document.getElementById("f-reset").addEventListener("click", function () {
+            search.value = "";
+            selects.forEach(function (select) { select.value = ""; });
+            hideApple.checked = false;
+            thirdParty.checked = false;
+            apply();
+        });
+
+        // Sorting. Numeric keys sort numerically; everything else as text.
+        var numeric = { risk: "risk", signature: "signatureOrder" };
+        var textKeys = { name: "name", category: "categoryName", status: "status",
+                         developer: "developer", path: "path" };
+        var headers = Array.prototype.slice.call(table.tHead.querySelectorAll("th"));
+        table.tHead.addEventListener("click", function (event) {
+            var button = event.target.closest("button[data-sort]");
+            if (!button) { return; }
+            var th = button.parentNode;
+            var key = button.dataset.sort;
+            var descending = th.getAttribute("aria-sort") === "ascending"
+                || (!th.hasAttribute("aria-sort") && key === "risk");
+            headers.forEach(function (h) { h.removeAttribute("aria-sort"); });
+            th.setAttribute("aria-sort", descending ? "descending" : "ascending");
+
+            rows.sort(function (a, b) {
+                var result;
+                if (numeric[key]) {
+                    result = Number(a.dataset[numeric[key]]) - Number(b.dataset[numeric[key]]);
+                } else {
+                    result = a.dataset[textKeys[key]].localeCompare(
+                        b.dataset[textKeys[key]], undefined, { numeric: true, sensitivity: "base" });
+                }
+                if (result === 0) {
+                    result = Number(b.dataset.risk) - Number(a.dataset.risk)
+                        || a.dataset.name.localeCompare(b.dataset.name);
+                    return result;
+                }
+                return descending ? -result : result;
+            });
+            rows.forEach(function (row) { tbody.insertBefore(row, empty); });
+        });
+
+        apply();
+
+        // Keep column headers below the sticky filter bar, whose height changes
+        // as it wraps (and as the item count text changes width).
+        function measure() {
+            root.style.setProperty("--filters-height", bar.offsetHeight + "px");
+        }
+        if (window.ResizeObserver) {
+            new ResizeObserver(measure).observe(bar);
+        } else {
+            window.addEventListener("resize", measure);
+        }
+        measure();
+    })();
+    """#
 }

@@ -88,12 +88,29 @@ struct PrivilegeBanner: View {
         }
     }
 
+    /// What the helper actually is.
+    ///
+    /// This used to claim the helper "only runs while LaunchAudit is open — never
+    /// on its own" and "isn't a persistent background process". Both were false as
+    /// implemented: the daemon publishes a Mach service, so launchd starts it on
+    /// demand whether or not the app is running. Consent obtained against an
+    /// inaccurate description is not consent. The helper now exits after 30s idle,
+    /// and the text says what it does.
     private var bodyText: String {
         switch viewModel.privilegeStatus {
         case .failed:
-            return "LaunchAudit couldn't start the helper daemon, so privileged scanners (Background Items, Configuration Profiles) are showing partial or empty results. The helper only runs while LaunchAudit is open — it isn't a persistent background process."
+            return "LaunchAudit couldn't start its helper, so Background Items and "
+                + "Configuration Profiles could not be scanned. Those categories are "
+                + "reported as incomplete rather than empty. You can also get full "
+                + "coverage without the helper by running `sudo launchaudit scan`."
         default:
-            return "Categories like Background Items and Configuration Profiles need the LaunchAudit helper. It's listed under \u{201C}Allow in the Background\u{201D} in System Settings, but only runs while LaunchAudit is open — never on its own. Enable it in System Settings \u{2192} General \u{2192} Login Items & Extensions, then re-scan."
+            return "Background Items and Configuration Profiles can only be read with "
+                + "administrator privileges. LaunchAudit installs a small helper that "
+                + "runs as root, answers only those two questions for this app, and "
+                + "quits 30 seconds after it is last used — macOS may start it again "
+                + "on demand. Enable it in System Settings → General → Login Items & "
+                + "Extensions, then scan again. Prefer not to? `sudo launchaudit scan` "
+                + "covers the same ground with no background item at all."
         }
     }
 }

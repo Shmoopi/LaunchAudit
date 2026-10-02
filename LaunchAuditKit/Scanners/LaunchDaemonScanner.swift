@@ -4,44 +4,35 @@ public struct LaunchDaemonScanner: PersistenceScanner {
     public let category = PersistenceCategory.launchDaemons
     public let requiresPrivilege = false
 
+    /// `/Library/Apple/System/Library/LaunchDaemons` is where Apple delivers
+    /// out-of-band, updatable daemons — XProtect, MRT, XprotectFramework. It is
+    /// **not** on the sealed system volume, so unlike `/System/Library` it is
+    /// modifiable with root. Omitting it was a genuine blind spot.
     public var scanPaths: [String] {
         [
             "/System/Library/LaunchDaemons",
-            "/Library/LaunchDaemons"
+            "/Library/Apple/System/Library/LaunchDaemons",
+            "/Library/LaunchDaemons",
         ]
     }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         let helper = DirectoryPlistScanner()
-        var allItems: [PersistenceItem] = []
-        var allErrors: [ScanError] = []
+        var outcome = ScanOutcome()
 
-        // System daemons (Apple)
-        let (sysItems, sysErrors) = helper.scanPlists(
-            in: ["/System/Library/LaunchDaemons"],
-            category: category,
-            owner: .system,
-            runContext: .boot
-        )
-        allItems.append(contentsOf: sysItems.map { item in
-            var modified = item
-            modified.riskLevel = .informational
-            return modified
-        })
-        allErrors.append(contentsOf: sysErrors)
+        for directory in scanPaths {
+            // `.boot` is the load context: a LaunchDaemon with RunAtLoad runs at
+            // system boot, not at login.
+            outcome.merge(helper.scanPlists(
+                in: [directory],
+                category: category,
+                owner: .system,
+                loadContext: .boot
+            ))
+        }
 
-        // Third-party daemons
-        let (libItems, libErrors) = helper.scanPlists(
-            in: ["/Library/LaunchDaemons"],
-            category: category,
-            owner: .system,
-            runContext: .boot
-        )
-        allItems.append(contentsOf: libItems)
-        allErrors.append(contentsOf: libErrors)
-
-        return allItems
+        return outcome
     }
 }

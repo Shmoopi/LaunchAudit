@@ -1,41 +1,96 @@
 import SwiftUI
 import Charts
 
-struct DashboardView: View {
-    @EnvironmentObject var viewModel: ScanViewModel
-    @Binding var selectedCategory: PersistenceCategory?
-    @Binding var showDashboard: Bool
-    @Binding var selectedItem: PersistenceItem?
+/// Everything the dashboard draws, computed in one pass when the results or the
+/// filters change. The dashboard used to derive each number on every render with
+/// its own `items.filter`, roughly fifteen full passes over the inventory, and
+/// re-rendered on every mouse movement over a card, chip or row.
+struct DashboardStats {
+    private(set) var total = 0
+    private(set) var unsigned = 0
+    private(set) var thirdParty = 0
+    private(set) var riskCounts: [RiskLevel: Int] = [:]
+    /// The ten categories with the most items, largest first.
+    private(set) var topCategories: [(category: PersistenceCategory, count: Int)] = []
+    /// High and critical items, worst first, capped at twenty.
+    private(set) var attentionItems: [PersistenceItem] = []
 
-    @State private var popoverItem: PersistenceItem?
-    @State private var hoveredCard: String?
-    @State private var hoveredRiskLevel: RiskLevel?
-    @State private var hoveredCategoryBar: PersistenceCategory?
-    @State private var hoveredAttentionItem: PersistenceItem.ID?
-    @State private var hoveredWarning: ScanError.ID?
-    @State private var selectedAngleValue: Double?
+    init() {}
 
-    private var items: [PersistenceItem] { viewModel.displayItems }
+    init(items: [PersistenceItem]) {
+        total = items.count
+        var categoryCounts: [PersistenceCategory: Int] = [:]
+        var attention: [PersistenceItem] = []
+        for item in items {
+            riskCounts[item.riskLevel, default: 0] += 1
+            categoryCounts[item.category, default: 0] += 1
+            if item.signingInfo?.isSigned != true { unsigned += 1 }
+            if !item.source.isApple { thirdParty += 1 }
+            if item.riskLevel >= .high { attention.append(item) }
+        }
+        topCategories = categoryCounts
+            .map { (category: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count { return lhs.count > rhs.count }
+                return lhs.category.displayName < rhs.category.displayName
+            }
+            .prefix(10)
+            .map { $0 }
+        attentionItems = attention
+            .sorted { $0.riskLevel != $1.riskLevel ? $0.riskLevel > $1.riskLevel : $0.name < $1.name }
+            .prefix(20)
+            .map { $0 }
+    }
 
-    /// Pre-computed (level, count) pairs for the risk donut, filtering out zero-count levels.
-    private var riskSlices: [(level: RiskLevel, count: Int)] {
+    func count(_ level: RiskLevel) -> Int { riskCounts[level] ?? 0 }
+
+    /// (level, count) pairs for the risk donut, without zero-count levels.
+    var riskSlices: [(level: RiskLevel, count: Int)] {
         RiskLevel.allCases.compactMap { level in
-            let count = items.filter { $0.riskLevel == level }.count
+            let count = count(level)
             return count > 0 ? (level, count) : nil
         }
     }
+}
 
-    /// Given a cumulative angle value from the chart, resolve which risk level it falls in.
-    private func riskLevel(forAngle angle: Double) -> RiskLevel? {
-        var cumulative = 0.0
-        for slice in riskSlices {
-            cumulative += Double(slice.count)
-            if angle <= cumulative { return slice.level }
-        }
-        return riskSlices.last?.level
-    }
+struct DashboardView: View {
+    @EnvironmentObject var viewModel: ScanViewModel
+    @Binding var selection: SidebarSelection?
+    @Binding var selectedItem: PersistenceItem?
+
+    @State private var popoverItem: PersistenceItem?
+
+    private var stats: DashboardStats { viewModel.dashboardStats }
 
     var body: some View {
+        if viewModel.lastResult == nil {
+            if viewModel.isScanning {
+                // The progress strip above says how far along the scan is. A
+                // dashboard of zeros here read as "your Mac has nothing on it".
+                ContentUnavailableView(
+                    "Scanning…",
+                    systemImage: "magnifyingglass",
+                    description: Text("Results will appear here when the scan finishes.")
+                )
+            } else {
+                // Before the first scan there is nothing to summarize.
+                ContentUnavailableView {
+                    Label("No Scan Yet", systemImage: "shield.lefthalf.filled")
+                } description: {
+                    Text("LaunchAudit inspects every place macOS can be told to run "
+                         + "something automatically — at boot, at login, on a schedule, "
+                         + "or in response to an event.")
+                } actions: {
+                    Button("Run a Scan") { viewModel.startScanTask() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+        } else {
+            dashboardContent
+        }
+    }
+
+    private var dashboardContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 // Privilege banner — shown inside the scroll content rather
@@ -70,13 +125,13 @@ struct DashboardView: View {
                 summaryCards
 
                 HStack(alignment: .top, spacing: 20) {
-                    riskDistributionChart
-                    categoryBarChart
+                    RiskDistributionView(stats: stats, onSelect: filterByRisk)
+                    CategoryBreakdownView(data: stats.topCategories, onSelect: navigateToCategory)
                 }
 
                 attentionNeededSection
 
-                scanWarningsSection
+                scanCoverageSection
             }
             .padding()
         }
@@ -88,73 +143,191 @@ struct DashboardView: View {
     private var summaryCards: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 12) {
             InteractiveSummaryCard(
-                title: "Total Items",
-                value: "\(items.count)",
-                icon: "list.bullet",
-                color: .blue,
-                isHovered: hoveredCard == "total"
+                title: "Total Items", value: stats.total,
+                icon: "list.bullet", color: .blue,
+                help: "View all items", action: navigateClearing
             )
-            .onHover { hoveredCard = $0 ? "total" : nil }
-            .onTapGesture { navigateClearing() }
-            .help("View all items")
-
             InteractiveSummaryCard(
-                title: "Critical",
-                value: "\(items.filter { $0.riskLevel == .critical }.count)",
-                icon: "exclamationmark.triangle.fill",
-                color: .red,
-                isHovered: hoveredCard == "critical"
+                title: "Critical", value: stats.count(.critical),
+                icon: "exclamationmark.triangle.fill", color: .red,
+                help: "Filter to critical risk items", action: { filterByRisk(.critical) }
             )
-            .onHover { hoveredCard = $0 ? "critical" : nil }
-            .onTapGesture { filterByRisk(.critical) }
-            .help("Filter to critical risk items")
-
             InteractiveSummaryCard(
-                title: "High",
-                value: "\(items.filter { $0.riskLevel == .high }.count)",
-                icon: "exclamationmark.circle.fill",
-                color: .orange,
-                isHovered: hoveredCard == "high"
+                title: "High", value: stats.count(.high),
+                icon: "exclamationmark.circle.fill", color: .orange,
+                help: "Filter to high risk items", action: { filterByRisk(.high) }
             )
-            .onHover { hoveredCard = $0 ? "high" : nil }
-            .onTapGesture { filterByRisk(.high) }
-            .help("Filter to high risk items")
-
             InteractiveSummaryCard(
-                title: "Unsigned",
-                value: "\(items.filter { $0.signingInfo?.isSigned != true }.count)",
-                icon: "signature",
-                color: .purple,
-                isHovered: hoveredCard == "unsigned"
+                title: "Unsigned", value: stats.unsigned,
+                icon: "signature", color: .purple,
+                help: "Filter to unsigned items", action: filterUnsigned
             )
-            .onHover { hoveredCard = $0 ? "unsigned" : nil }
-            .onTapGesture { filterUnsigned() }
-            .help("Filter to unsigned items")
-
             InteractiveSummaryCard(
-                title: "Third-Party",
-                value: "\(items.filter { !$0.source.isApple }.count)",
-                icon: "person.2",
-                color: .teal,
-                isHovered: hoveredCard == "thirdparty"
+                title: "Third-Party", value: stats.thirdParty,
+                icon: "person.2", color: .teal,
+                help: "Filter to third-party items", action: filterThirdParty
             )
-            .onHover { hoveredCard = $0 ? "thirdparty" : nil }
-            .onTapGesture { filterThirdParty() }
-            .help("Filter to third-party items")
         }
     }
 
-    // MARK: - Risk Distribution Chart
+    // MARK: - Attention Needed
 
-    private var riskDistributionChart: some View {
+    @ViewBuilder
+    private var attentionNeededSection: some View {
+        if !stats.attentionItems.isEmpty {
+            GroupBox("Attention Needed") {
+                LazyVStack(spacing: 0) {
+                    ForEach(stats.attentionItems) { item in
+                        AttentionRow(
+                            item: item,
+                            onOpen: { navigateToItem(item) },
+                            onShowDetails: { popoverItem = item },
+                            onGoToCategory: { navigateToCategory(item.category) }
+                        )
+                    }
+                }
+            }
+            .itemDetailOverlay(item: $popoverItem)
+        }
+    }
+
+    // MARK: - Scan Warnings
+
+    /// Scan coverage.
+    ///
+    /// This is the panel that tells the user which results are incomplete. It never
+    /// appeared before, because no scanner ever reported an error — so "0 items"
+    /// was indistinguishable from "could not look".
+    @ViewBuilder
+    private var scanCoverageSection: some View {
+        if let result = viewModel.lastResult, result.hasCoverageGaps {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label {
+                        Text("Scan Coverage")
+                            .font(.headline)
+                    } icon: {
+                        Image(systemName: "exclamationmark.shield")
+                    }
+
+                    if !result.ranAsRoot {
+                        coverageRow(
+                            symbol: "lock.fill",
+                            title: "Not run with administrator privileges",
+                            detail: "Categories that need root were skipped. "
+                                + "Run `sudo launchaudit scan` for full coverage."
+                        )
+                    }
+
+                    if !result.hadAuthoritativeLaunchdState {
+                        coverageRow(
+                            symbol: "questionmark.circle",
+                            title: "launchd enable/disable state is unverified",
+                            detail: "The override database needs root to read, so "
+                                + "Enabled/Disabled comes from each plist and can be wrong."
+                        )
+                    }
+
+                    ForEach(result.errors) { error in
+                        CoverageErrorRow(error: error) {
+                            if let category = error.category { navigateToCategory(category) }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(4)
+            }
+        }
+    }
+
+    private func coverageRow(symbol: String, title: String, detail: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fontWeight(.medium)
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    // MARK: - Navigation Actions
+
+    private func navigateToCategory(_ category: PersistenceCategory) {
+        selection = .category(category)
+    }
+
+    private func navigateToItem(_ item: PersistenceItem) {
+        // Set both in one update. The previous version navigated and then set the
+        // selection 0.1s later via `asyncAfter`, which raced a slow first render.
+        selection = .category(item.category)
+        selectedItem = item
+    }
+
+    /// Clear every filter and show the whole inventory.
+    ///
+    /// The summary cards used to only mutate a filter that the dashboard itself did
+    /// not apply, so clicking "Critical — 2" changed a toolbar picker and nothing
+    /// else on screen. They now navigate to the matching list.
+    private func navigateClearing() {
+        viewModel.minimumRiskFilter = nil
+        viewModel.showOnlyUnsigned = false
+        viewModel.showOnlyThirdParty = false
+        viewModel.searchText = ""
+        selection = .allItems
+    }
+
+    private func filterByRisk(_ level: RiskLevel) {
+        viewModel.minimumRiskFilter = level
+        viewModel.showOnlyUnsigned = false
+        viewModel.showOnlyThirdParty = false
+        viewModel.searchText = ""
+        selection = .allItems
+    }
+
+    private func filterUnsigned() {
+        viewModel.searchText = ""
+        viewModel.minimumRiskFilter = nil
+        viewModel.showOnlyThirdParty = false
+        viewModel.showOnlyUnsigned.toggle()
+        if viewModel.showOnlyUnsigned { selection = .allItems }
+    }
+
+    private func filterThirdParty() {
+        defer { if viewModel.showOnlyThirdParty { selection = .allItems } }
+        viewModel.searchText = ""
+        viewModel.minimumRiskFilter = nil
+        viewModel.showOnlyUnsigned = false
+        viewModel.showOnlyThirdParty.toggle()
+    }
+}
+
+// MARK: - Risk Distribution
+
+/// The risk donut and its legend. Hover state lives here, so moving the mouse over
+/// the chart redraws the chart rather than the whole dashboard.
+private struct RiskDistributionView: View {
+    let stats: DashboardStats
+    let onSelect: (RiskLevel) -> Void
+
+    @State private var hoveredRiskLevel: RiskLevel?
+    @State private var selectedAngleValue: Double?
+
+    var body: some View {
         GroupBox("Risk Distribution") {
-            if !items.isEmpty {
-                riskDonutChart
+            if stats.total > 0 {
+                donutChart
                     .frame(height: 200)
 
                 // Hover tooltip under the chart
                 if let hovered = hoveredRiskLevel {
-                    let count = items.filter { $0.riskLevel == hovered }.count
+                    let count = stats.count(hovered)
                     HStack(spacing: 6) {
                         Circle().fill(hovered.color).frame(width: 10, height: 10)
                         Text("\(hovered.displayName): \(count) item\(count == 1 ? "" : "s")")
@@ -164,19 +337,19 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 4)
-                    .transition(.opacity.combined(with: .scale(scale: 0.95)))
-                    .animation(.easeInOut(duration: 0.15), value: hoveredRiskLevel)
+                    .transition(.opacity)
                 }
 
-                riskLegend
+                legend
             }
         }
         .frame(maxWidth: .infinity)
     }
 
-    private var riskDonutChart: some View {
-        Chart {
-            ForEach(riskSlices, id: \.level) { slice in
+    private var donutChart: some View {
+        let slices = stats.riskSlices
+        return Chart {
+            ForEach(slices, id: \.level) { slice in
                 SectorMark(
                     angle: .value("Count", slice.count),
                     innerRadius: .ratio(hoveredRiskLevel == slice.level ? 0.45 : 0.5),
@@ -199,31 +372,52 @@ struct DashboardView: View {
                     .fill(Color.clear)
                     .contentShape(Rectangle())
                     .onContinuousHover { phase in
+                        let level: RiskLevel?
                         switch phase {
                         case .active(let loc):
-                            hoveredRiskLevel = resolveHoveredSector(at: loc, in: geo.size)
+                            level = resolveHoveredSector(at: loc, in: geo.size, slices: slices)
                         case .ended:
-                            hoveredRiskLevel = nil
+                            level = nil
                         }
+                        // Continuous hover fires on every mouse movement; only an
+                        // actual change of sector should cause a redraw.
+                        if level != hoveredRiskLevel { hoveredRiskLevel = level }
                     }
                     .onTapGesture { loc in
-                        if let level = resolveHoveredSector(at: loc, in: geo.size) {
-                            filterByRisk(level)
+                        if let level = resolveHoveredSector(at: loc, in: geo.size, slices: slices) {
+                            onSelect(level)
                         }
                     }
             }
         }
         .animation(.easeInOut(duration: 0.15), value: hoveredRiskLevel)
         .onChange(of: selectedAngleValue) { _, newValue in
-            if let angle = newValue, let level = riskLevel(forAngle: angle) {
-                filterByRisk(level)
+            if let angle = newValue, let level = Self.riskLevel(forAngle: angle, slices: slices) {
+                onSelect(level)
                 selectedAngleValue = nil
             }
         }
     }
 
+    /// Given a cumulative angle value from the chart, resolve which risk level it falls in.
+    private static func riskLevel(
+        forAngle angle: Double,
+        slices: [(level: RiskLevel, count: Int)]
+    ) -> RiskLevel? {
+        var cumulative = 0.0
+        for slice in slices {
+            cumulative += Double(slice.count)
+            if angle <= cumulative { return slice.level }
+        }
+        return slices.last?.level
+    }
+
     /// Convert a point inside the chart frame to the risk level whose sector it falls in.
-    private func resolveHoveredSector(at location: CGPoint, in size: CGSize) -> RiskLevel? {
+    private func resolveHoveredSector(
+        at location: CGPoint,
+        in size: CGSize,
+        slices: [(level: RiskLevel, count: Int)]
+    ) -> RiskLevel? {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let dx = location.x - center.x
         let dy = location.y - center.y
@@ -238,96 +432,77 @@ struct DashboardView: View {
         var angle = atan2(dx, -dy) // radians from 12-o'clock, clockwise
         if angle < 0 { angle += 2 * .pi }
 
-        let totalCount = riskSlices.reduce(0) { $0 + $1.count }
+        let totalCount = slices.reduce(0) { $0 + $1.count }
         guard totalCount > 0 else { return nil }
 
         let fraction = angle / (2 * .pi)
-        let targetValue = fraction * Double(totalCount)
-
-        return riskLevel(forAngle: targetValue)
+        return Self.riskLevel(forAngle: fraction * Double(totalCount), slices: slices)
     }
 
-    private var riskLegend: some View {
+    private var legend: some View {
         HStack(spacing: 12) {
             ForEach(RiskLevel.allCases, id: \.self) { level in
-                riskLegendButton(level: level)
+                Button {
+                    onSelect(level)
+                } label: {
+                    HStack(spacing: 4) {
+                        Circle().fill(level.color).frame(width: 8, height: 8)
+                        Text("\(level.displayName) (\(stats.count(level)))")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        hoveredRiskLevel == level ? level.color.opacity(0.15) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 4)
+                    )
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside { hoveredRiskLevel = level } else if hoveredRiskLevel == level { hoveredRiskLevel = nil }
+                }
+                .help("Filter to \(level.displayName.lowercased()) risk items")
             }
         }
     }
+}
 
-    private func riskLegendButton(level: RiskLevel) -> some View {
-        let count = items.filter { $0.riskLevel == level }.count
-        return Button {
-            filterByRisk(level)
-        } label: {
-            HStack(spacing: 4) {
-                Circle().fill(level.color).frame(width: 8, height: 8)
-                Text("\(level.displayName) (\(count))")
-                    .font(.caption)
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(
-                hoveredRiskLevel == level
-                    ? level.color.opacity(0.15)
-                    : Color.clear,
-                in: RoundedRectangle(cornerRadius: 4)
-            )
-        }
-        .buttonStyle(.plain)
-        .onHover { hoveredRiskLevel = $0 ? level : nil }
-        .help("Filter to \(level.displayName.lowercased()) risk items")
-    }
+// MARK: - Category Breakdown
 
-    // MARK: - Category Bar Chart
+private struct CategoryBreakdownView: View {
+    let data: [(category: PersistenceCategory, count: Int)]
+    let onSelect: (PersistenceCategory) -> Void
 
-    private var categoryBarChart: some View {
-        let grouped = Dictionary(grouping: items, by: \.category)
-        let mapped = grouped.map { (category: $0.key, count: $0.value.count) }
-        let categoryCounts = mapped
-            .sorted { lhs, rhs in
-                if lhs.count != rhs.count { return lhs.count > rhs.count }
-                return lhs.category.displayName < rhs.category.displayName
-            }
-            .prefix(10)
+    @State private var hoveredCategory: PersistenceCategory?
 
-        return GroupBox("Items by Category (Top 10)") {
-            if !items.isEmpty {
-                categoryChart(data: Array(categoryCounts))
-                    .frame(height: 250)
+    var body: some View {
+        GroupBox("Items by Category (Top 10)") {
+            if !data.isEmpty {
+                Chart(data, id: \.category) { item in
+                    BarMark(
+                        x: .value("Count", item.count),
+                        y: .value("Category", item.category.displayName)
+                    )
+                    .foregroundStyle(
+                        hoveredCategory == item.category ? Color.blue : Color.blue.opacity(0.7)
+                    )
+                }
+                .frame(height: 250)
 
-                categoryChips(data: Array(categoryCounts))
-                    .padding(.top, 4)
+                FlowLayout(spacing: 6) {
+                    ForEach(data, id: \.category) { item in
+                        chip(item.category)
+                    }
+                }
+                .padding(.top, 4)
             }
         }
         .frame(maxWidth: .infinity)
     }
 
-    private func categoryChart(data: [(category: PersistenceCategory, count: Int)]) -> some View {
-        Chart(data, id: \.category) { item in
-            BarMark(
-                x: .value("Count", item.count),
-                y: .value("Category", item.category.displayName)
-            )
-            .foregroundStyle(
-                hoveredCategoryBar == item.category
-                    ? Color.blue
-                    : Color.blue.opacity(0.7)
-            )
-        }
-    }
-
-    private func categoryChips(data: [(category: PersistenceCategory, count: Int)]) -> some View {
-        FlowLayout(spacing: 6) {
-            ForEach(data, id: \.category) { item in
-                categoryChipButton(category: item.category)
-            }
-        }
-    }
-
-    private func categoryChipButton(category: PersistenceCategory) -> some View {
+    private func chip(_ category: PersistenceCategory) -> some View {
         Button {
-            navigateToCategory(category)
+            onSelect(category)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: category.sfSymbol)
@@ -338,173 +513,124 @@ struct DashboardView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(
-                hoveredCategoryBar == category
-                    ? Color.blue.opacity(0.15)
-                    : Color.clear,
+                hoveredCategory == category ? Color.blue.opacity(0.15) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 6)
             )
         }
         .buttonStyle(.plain)
-        .onHover { hoveredCategoryBar = $0 ? category : nil }
+        .onHover { inside in
+            if inside { hoveredCategory = category } else if hoveredCategory == category { hoveredCategory = nil }
+        }
         .help("View \(category.displayName)")
     }
+}
 
-    // MARK: - Attention Needed
+// MARK: - Attention Row
 
-    private var attentionNeededSection: some View {
-        let attentionItems = items
-            .filter { $0.riskLevel >= .high }
-            .sorted { $0.riskLevel != $1.riskLevel ? $0.riskLevel > $1.riskLevel : $0.name < $1.name }
+private struct AttentionRow: View {
+    let item: PersistenceItem
+    let onOpen: () -> Void
+    let onShowDetails: () -> Void
+    let onGoToCategory: () -> Void
 
-        return Group {
-            if !attentionItems.isEmpty {
-                GroupBox("Attention Needed") {
-                    ForEach(attentionItems.prefix(20)) { item in
-                        HStack {
-                            RiskBadge(level: item.riskLevel)
-                            Text(item.name)
-                                .lineLimit(1)
-                            Spacer()
-                            Text(item.category.displayName)
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(
-                                    hoveredAttentionItem == item.id
-                                        ? Color.blue.opacity(0.1)
-                                        : Color.clear,
-                                    in: Capsule()
-                                )
-                            if !item.riskReasons.isEmpty {
-                                Text(item.riskReasons.first!)
-                                    .font(.caption)
-                                    .foregroundStyle(.orange)
-                                    .lineLimit(1)
-                            }
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 6)
-                        .background(
-                            hoveredAttentionItem == item.id
-                                ? Color.primary.opacity(0.04)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
-                        .contentShape(Rectangle())
-                        .onHover { hoveredAttentionItem = $0 ? item.id : nil }
-                        .onTapGesture {
-                            navigateToItem(item)
-                        }
-                        .contextMenu {
-                            Button("View Details") {
-                                popoverItem = item
-                            }
-                            Button("Go to \(item.category.displayName)") {
-                                navigateToCategory(item.category)
-                            }
-                            if let path = item.configPath ?? item.executablePath {
-                                Divider()
-                                Button("Reveal in Finder") {
-                                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-                                }
-                                Button("Copy Path") {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(path, forType: .string)
-                                }
-                            }
-                        }
-                    }
-                }
-                .itemDetailOverlay(item: $popoverItem)
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack {
+            RiskBadge(level: item.riskLevel)
+            Text(item.name)
+                .lineLimit(1)
+            Spacer()
+            Text(item.category.displayName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(isHovered ? Color.blue.opacity(0.1) : Color.clear, in: Capsule())
+            if let reason = item.riskReasons.first {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
             }
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-    }
-
-    // MARK: - Scan Warnings
-
-    private var scanWarningsSection: some View {
-        Group {
-            if let result = viewModel.lastResult, !result.errors.isEmpty {
-                GroupBox("Scan Warnings") {
-                    ForEach(result.errors) { error in
-                        HStack {
-                            Image(systemName: error.isPermissionDenied ? "lock.fill" : "exclamationmark.triangle")
-                                .foregroundStyle(.orange)
-                            Text(error.category.displayName)
-                                .fontWeight(.medium)
-                            Text(error.message)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 6)
-                        .background(
-                            hoveredWarning == error.id
-                                ? Color.primary.opacity(0.04)
-                                : Color.clear,
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
-                        .contentShape(Rectangle())
-                        .onHover { hoveredWarning = $0 ? error.id : nil }
-                        .onTapGesture {
-                            navigateToCategory(error.category)
-                        }
-                        .help("Go to \(error.category.displayName)")
-                    }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 6)
+        .background(
+            isHovered ? Color.primary.opacity(0.04) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture(perform: onOpen)
+        .contextMenu {
+            Button("View Details", action: onShowDetails)
+            Button("Go to \(item.category.displayName)", action: onGoToCategory)
+            if let path = item.configPath ?? item.executablePath {
+                Divider()
+                Button("Reveal in Finder") {
+                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                }
+                Button("Copy Path") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(path, forType: .string)
                 }
             }
         }
     }
+}
 
-    // MARK: - Navigation Actions
+// MARK: - Coverage Error Row
 
-    private func navigateToCategory(_ category: PersistenceCategory) {
-        selectedCategory = category
-        showDashboard = false
-    }
+private struct CoverageErrorRow: View {
+    let error: ScanError
+    let action: () -> Void
 
-    private func navigateToItem(_ item: PersistenceItem) {
-        selectedCategory = item.category
-        showDashboard = false
-        // Slight delay so the list view has time to appear
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            selectedItem = item
+    @State private var isHovered = false
+
+    var body: some View {
+        // A real Button, so it is keyboard-reachable and announced as a control.
+        // These used to be `.onTapGesture` on a plain HStack.
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: error.isPermissionDenied
+                      ? "lock.fill" : "exclamationmark.triangle")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(error.category?.displayName ?? "Scan")
+                        .fontWeight(.medium)
+                    Text(error.message)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                if error.category != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .accessibilityHidden(true)
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .background(
+                isHovered ? AnyShapeStyle(.selection) : AnyShapeStyle(.clear),
+                in: RoundedRectangle(cornerRadius: 6)
+            )
+            .contentShape(Rectangle())
         }
-    }
-
-    private func navigateClearing() {
-        viewModel.minimumRiskFilter = nil
-        viewModel.showOnlyUnsigned = false
-        viewModel.showOnlyThirdParty = false
-        viewModel.searchText = ""
-    }
-
-    private func filterByRisk(_ level: RiskLevel) {
-        viewModel.minimumRiskFilter = level
-        viewModel.showOnlyUnsigned = false
-        viewModel.showOnlyThirdParty = false
-        viewModel.searchText = ""
-    }
-
-    private func filterUnsigned() {
-        viewModel.searchText = ""
-        viewModel.minimumRiskFilter = nil
-        viewModel.showOnlyThirdParty = false
-        viewModel.showOnlyUnsigned.toggle()
-    }
-
-    private func filterThirdParty() {
-        viewModel.searchText = ""
-        viewModel.minimumRiskFilter = nil
-        viewModel.showOnlyUnsigned = false
-        viewModel.showOnlyThirdParty.toggle()
+        .buttonStyle(.plain)
+        .disabled(error.category == nil)
+        .onHover { isHovered = $0 }
+        .accessibilityLabel(
+            "\(error.category?.displayName ?? "Scan") coverage issue: \(error.message)"
+        )
+        .help(error.category.map { "Go to \($0.displayName)" } ?? error.message)
     }
 }
 
@@ -512,10 +638,13 @@ struct DashboardView: View {
 
 struct InteractiveSummaryCard: View {
     let title: String
-    let value: String
+    let value: Int
     let icon: String
     let color: Color
-    let isHovered: Bool
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovered = false
 
     var body: some View {
         GroupBox {
@@ -523,8 +652,9 @@ struct InteractiveSummaryCard: View {
                 Image(systemName: icon)
                     .font(.title2)
                     .foregroundStyle(color)
-                Text(value)
+                Text("\(value)")
                     .font(.title.bold())
+                    .monospacedDigit()
                 Text(title)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -532,31 +662,25 @@ struct InteractiveSummaryCard: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
         }
+        // A stroke rather than a scale-and-shadow effect: the old hover state
+        // rescaled and re-shadowed the whole card on every enter and exit, which
+        // forced an offscreen render pass per card.
         .overlay(
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isHovered ? color.opacity(0.5) : .clear, lineWidth: 2)
         )
-        .scaleEffect(isHovered ? 1.03 : 1.0)
-        .shadow(color: isHovered ? color.opacity(0.2) : .clear, radius: 4)
-        .animation(.easeInOut(duration: 0.15), value: isHovered)
         .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture(perform: action)
+        .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, action)
     }
 }
 
-// MARK: - Risk Badge (unchanged)
-
-struct RiskBadge: View {
-    let level: RiskLevel
-
-    var body: some View {
-        Text(level.displayName)
-            .font(.caption2.bold())
-            .foregroundStyle(.white)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(level.color, in: Capsule())
-    }
-}
+// `RiskBadge` and `RiskIndicator` live in RiskLevel+Presentation.swift, which
+// owns the contrast-checked palette and the per-level glyphs.
 
 // MARK: - Flow Layout for category chips
 

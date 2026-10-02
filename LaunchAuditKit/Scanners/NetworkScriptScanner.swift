@@ -10,10 +10,14 @@ public struct NetworkScriptScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         var items: [PersistenceItem] = []
 
-        let scripts = ["ip-up", "ip-down", "ipv6-up", "ipv6-down"]
+        // `auth-up` and `auth-down` are documented in `man pppd` and are equally
+        // usable for persistence; they were missing from the list.
+        let scripts = [
+            "ip-up", "ip-down", "ipv6-up", "ipv6-down", "auth-up", "auth-down",
+        ]
         for script in scripts {
             let path = "/etc/ppp/\(script)"
             guard PathUtilities.exists(path) else { continue }
@@ -35,6 +39,6 @@ public struct NetworkScriptScanner: PersistenceScanner {
             ))
         }
 
-        return items
+        return ScanOutcome(items: items)
     }
 }

@@ -34,26 +34,9 @@ public actor ProcessRunner {
                 continuation.resume(with: result)
             }
 
-            // Drain pipes concurrently so the child can never block on full
-            // pipe buffers. Each call to readDataToEndOfFile returns when the
-            // corresponding write end closes — i.e. when the child exits or
-            // closes its stream.
             let collectedStdout = OutputCollector()
             let collectedStderr = OutputCollector()
             let drainGroup = DispatchGroup()
-
-            drainGroup.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                let data = stdout.fileHandleForReading.readDataToEndOfFile()
-                collectedStdout.set(data)
-                drainGroup.leave()
-            }
-            drainGroup.enter()
-            DispatchQueue.global(qos: .userInitiated).async {
-                let data = stderr.fileHandleForReading.readDataToEndOfFile()
-                collectedStderr.set(data)
-                drainGroup.leave()
-            }
 
             // Timeout
             let timer = DispatchSource.makeTimerSource(queue: .global())
@@ -62,7 +45,6 @@ public actor ProcessRunner {
                 process.terminate()
                 resumeOnce(with: .failure(ProcessRunnerError.timeout))
             }
-            timer.resume()
 
             process.terminationHandler = { _ in
                 timer.cancel()
@@ -87,17 +69,39 @@ public actor ProcessRunner {
             do {
                 try process.run()
             } catch {
-                timer.cancel()
+                // Close both ends before bailing out. The drain blocks are started
+                // only after a successful launch — dispatching them first meant a
+                // launch failure (missing binary, EACCES, sandbox denial) left two
+                // libdispatch workers blocked forever in readDataToEndOfFile with
+                // the pipe write-ends still open, leaking two threads and two file
+                // descriptors per failed call.
+                try? stdout.fileHandleForWriting.close()
+                try? stdout.fileHandleForReading.close()
+                try? stderr.fileHandleForWriting.close()
+                try? stderr.fileHandleForReading.close()
                 resumeOnce(with: .failure(error))
+                return
             }
-        }
-    }
 
-    /// Run a shell command via /bin/sh -c.
-    /// Prefer `run(_:arguments:)` when no shell features are needed —
-    /// it skips the /bin/sh fork.
-    public func shell(_ command: String, timeout: TimeInterval = 30) async throws -> String {
-        try await run("/bin/sh", arguments: ["-c", command], timeout: timeout)
+            // Drain pipes concurrently so the child can never block on full
+            // pipe buffers. Each call to readDataToEndOfFile returns when the
+            // corresponding write end closes — i.e. when the child exits or
+            // closes its stream.
+            drainGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = stdout.fileHandleForReading.readDataToEndOfFile()
+                collectedStdout.set(data)
+                drainGroup.leave()
+            }
+            drainGroup.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = stderr.fileHandleForReading.readDataToEndOfFile()
+                collectedStderr.set(data)
+                drainGroup.leave()
+            }
+
+            timer.resume()
+        }
     }
 
     /// Run and return nil on error instead of throwing.
@@ -109,10 +113,13 @@ public actor ProcessRunner {
         try? await run(executable, arguments: arguments, timeout: timeout)
     }
 
-    /// Run a shell command and return nil on error.
-    public func tryShell(_ command: String, timeout: TimeInterval = 30) async -> String? {
-        try? await shell(command, timeout: timeout)
-    }
+    // NOTE: there is deliberately no `shell(_:)` helper.
+    //
+    // The previous `shell` / `tryShell` pair forwarded to `/bin/sh -c` and had
+    // zero call sites anywhere in the project. Every subprocess here uses an
+    // absolute executable path and a literal argument array, so no scanned
+    // filename or plist value can ever reach a shell. Removing the helpers keeps
+    // it that way rather than leaving a loaded gun for a future refactor.
 }
 
 /// Thread-safe holder for output bytes collected on a background queue.

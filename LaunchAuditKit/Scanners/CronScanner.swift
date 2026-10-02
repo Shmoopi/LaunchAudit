@@ -7,108 +7,171 @@ public struct CronScanner: PersistenceScanner {
     public var scanPaths: [String] {
         [
             "/etc/crontab",
+            "/etc/cron.d",
             "/private/var/at/tabs",
-            "/private/var/at/jobs"
+            "/private/var/at/jobs",
         ]
     }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
 
         // Current user's crontab
         if let output = await ProcessRunner.shared.tryRun("/usr/bin/crontab", arguments: ["-l"]) {
-            let entries = parseCrontab(output, owner: .user(PathUtilities.currentUser))
-            items.append(contentsOf: entries)
+            outcome.items += parseCrontab(output, owner: .user(PathUtilities.currentUser))
         }
 
-        // System crontab
+        // System crontab. Six-field format: the field after the schedule is the
+        // user the job runs as, not the command.
         if PathUtilities.exists("/etc/crontab") {
-            if let data = try? String(contentsOfFile: "/etc/crontab", encoding: .utf8) {
-                let entries = parseCrontab(data, owner: .system)
-                items.append(contentsOf: entries)
+            do {
+                let text = try SafeRead.text(atPath: "/etc/crontab")
+                outcome.items += parseCrontab(
+                    text, owner: .system, configPath: "/etc/crontab", hasUserField: true
+                )
+            } catch {
+                outcome.errors.append(scanError(error, path: "/etc/crontab"))
             }
         }
 
-        // User crontab files in /private/var/at/tabs/
-        let tabsDir = "/private/var/at/tabs"
-        if PathUtilities.exists(tabsDir) {
-            let files = PathUtilities.listFiles(in: tabsDir)
-            for file in files {
-                let username = (file as NSString).lastPathComponent
-                if let data = try? String(contentsOfFile: file, encoding: .utf8) {
-                    let entries = parseCrontab(data, owner: .user(username), configPath: file)
-                    items.append(contentsOf: entries)
-                }
+        // Drop-in crontabs, also in six-field format.
+        let (dropIns, dropInErrors) = entries(in: "/etc/cron.d")
+        outcome.errors += dropInErrors
+        for file in dropIns {
+            do {
+                let text = try SafeRead.text(atPath: file)
+                outcome.items += parseCrontab(
+                    text, owner: .system, configPath: file, hasUserField: true
+                )
+            } catch {
+                outcome.errors.append(scanError(error, path: file))
             }
         }
 
-        // at jobs
-        let atDir = "/private/var/at/jobs"
-        if PathUtilities.exists(atDir) {
-            let jobs = PathUtilities.listFiles(in: atDir)
-            for job in jobs {
-                let name = (job as NSString).lastPathComponent
-                let timestamps = PathUtilities.timestamps(for: job)
-                items.append(PersistenceItem(
-                    category: category,
-                    name: "at job: \(name)",
-                    configPath: job,
-                    isEnabled: true,
-                    runContext: .scheduled,
-                    owner: .system,
-                    timestamps: timestamps,
-                    rawMetadata: ["Type": .string("at")]
-                ))
+        // Per-user crontab spool files.
+        let (tabs, tabErrors) = entries(in: "/private/var/at/tabs")
+        outcome.errors += tabErrors
+        for file in tabs {
+            let username = (file as NSString).lastPathComponent
+            do {
+                let text = try SafeRead.text(atPath: file)
+                outcome.items += parseCrontab(text, owner: .user(username), configPath: file)
+            } catch {
+                outcome.errors.append(scanError(error, path: file))
             }
         }
 
-        return items
+        // `at` jobs.
+        let (jobs, jobErrors) = entries(in: "/private/var/at/jobs")
+        outcome.errors += jobErrors
+        // `at` only executes when com.apple.atrun is enabled, and it ships
+        // disabled. Saying so keeps these from reading as live scheduled tasks.
+        let atrunEnabled = await Self.isAtrunEnabled()
+        for job in jobs {
+            let name = (job as NSString).lastPathComponent
+            var item = PersistenceItem(
+                category: category,
+                name: "at job: \(name)",
+                configPath: job,
+                isEnabled: atrunEnabled,
+                runContext: .scheduled,
+                owner: .system,
+                timestamps: PathUtilities.timestamps(for: job),
+                rawMetadata: [
+                    "Type": .string("at"),
+                    "AtrunEnabled": .bool(atrunEnabled),
+                ]
+            )
+            if !atrunEnabled {
+                item.riskMitigations.append(
+                    "com.apple.atrun is disabled, so queued at jobs will not run"
+                )
+            }
+            outcome.items.append(item)
+        }
+
+        return outcome
     }
 
-    private func parseCrontab(_ content: String, owner: ItemOwner, configPath: String? = nil) -> [PersistenceItem] {
+    /// `at` jobs are dispatched by com.apple.atrun, which Apple ships disabled.
+    private static func isAtrunEnabled() async -> Bool {
+        let plist = "/System/Library/LaunchDaemons/com.apple.atrun.plist"
+        guard let dict = try? PlistParser().parse(at: plist) else { return false }
+        let disabledInPlist = (dict["Disabled"] as? Bool) ?? false
+        let label = dict["Label"] as? String ?? "com.apple.atrun"
+        return LaunchdStateResolver.shared.isEnabled(
+            label: label, plistDisabledKey: disabledInPlist, owner: .system
+        ).isEnabled
+    }
+
+    /// Parse crontab content.
+    ///
+    /// - Parameter hasUserField: true for `/etc/crontab` and `/etc/cron.d`, whose
+    ///   format inserts a user column between the schedule and the command. Without
+    ///   this the user name was parsed as the executable, so every system cron
+    ///   entry reported `root` as its binary with all arguments shifted by one.
+    func parseCrontab(
+        _ content: String,
+        owner: ItemOwner,
+        configPath: String? = nil,
+        hasUserField: Bool = false
+    ) -> [PersistenceItem] {
         var items: [PersistenceItem] = []
 
         for line in content.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             // Skip comments and empty lines
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { continue }
-            // Skip variable assignments
-            guard !trimmed.contains("=") || trimmed.first?.isNumber == true || trimmed.first == "*" || trimmed.first == "@" else { continue }
+            // Skip variable assignments (PATH=, SHELL=, MAILTO=)
+            guard !trimmed.contains("=") || trimmed.first?.isNumber == true
+                || trimmed.first == "*" || trimmed.first == "@" else { continue }
 
-            // Parse the cron line
             let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            guard parts.count >= 6 else { continue }
 
-            let schedule: String
-            let command: String
+            let isSpecial = trimmed.hasPrefix("@")
+            // A special schedule needs only two tokens: `@reboot /path/to/thing`.
+            // Requiring six unconditionally discarded every `@reboot` entry —
+            // the primary cron persistence vector — before the `@` branch ran.
+            let scheduleFieldCount = isSpecial ? 1 : 5
+            let minimumFields = scheduleFieldCount + (hasUserField ? 1 : 0) + 1
+            guard parts.count >= minimumFields else { continue }
 
-            if trimmed.hasPrefix("@") {
-                // Special schedule (@reboot, @daily, etc.)
-                schedule = parts[0]
-                command = parts.dropFirst(1).joined(separator: " ")
-            } else {
-                schedule = parts.prefix(5).joined(separator: " ")
-                command = parts.dropFirst(5).joined(separator: " ")
+            let schedule = parts.prefix(scheduleFieldCount).joined(separator: " ")
+            var remainder = Array(parts.dropFirst(scheduleFieldCount))
+
+            var runAsUser: String?
+            if hasUserField, !remainder.isEmpty {
+                runAsUser = remainder.removeFirst()
             }
 
-            let executable = command.components(separatedBy: .whitespaces).first ?? command
+            let command = remainder.joined(separator: " ")
+            guard !command.isEmpty else { continue }
+
+            let executable = remainder.first ?? command
+            let effectiveOwner: ItemOwner = {
+                guard let runAsUser else { return owner }
+                return runAsUser == "root" ? .system : .user(runAsUser)
+            }()
+
+            var metadata: [String: PlistValue] = [
+                "Schedule": .string(schedule),
+                "Command": .string(command),
+                "Type": .string("cron"),
+            ]
+            if let runAsUser { metadata["RunAsUser"] = .string(runAsUser) }
 
             items.append(PersistenceItem(
                 category: category,
-                name: command.prefix(80).description,
+                name: String(command.prefix(80)),
                 configPath: configPath,
                 executablePath: executable,
-                arguments: Array(command.components(separatedBy: .whitespaces).dropFirst()),
+                arguments: remainder,
                 isEnabled: true,
-                runContext: schedule.contains("@reboot") ? .boot : .scheduled,
-                owner: owner,
-                rawMetadata: [
-                    "Schedule": .string(schedule),
-                    "Command": .string(command),
-                    "Type": .string("cron")
-                ]
+                runContext: schedule.hasPrefix("@reboot") ? .boot : .scheduled,
+                owner: effectiveOwner,
+                rawMetadata: metadata
             ))
         }
 

@@ -17,28 +17,21 @@ public struct PeriodicScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
 
-        let periods: [(String, String)] = [
-            ("daily", "/etc/periodic/daily"),
-            ("weekly", "/etc/periodic/weekly"),
-            ("monthly", "/etc/periodic/monthly"),
-            ("daily", "/usr/local/etc/periodic/daily"),
-            ("weekly", "/usr/local/etc/periodic/weekly"),
-            ("monthly", "/usr/local/etc/periodic/monthly"),
-        ]
-
-        for (period, directory) in periods {
-            guard PathUtilities.exists(directory) else { continue }
-            let scripts = PathUtilities.listFiles(in: directory)
+        // Derived from `scanPaths` so the declared list and the scanned list
+        // cannot drift apart.
+        for directory in scanPaths {
+            let period = (directory as NSString).lastPathComponent
+            let (scripts, errors) = entries(in: directory)
+            outcome.errors += errors
 
             for script in scripts {
                 let name = (script as NSString).lastPathComponent
-                guard !name.hasPrefix(".") else { continue }
                 let timestamps = PathUtilities.timestamps(for: script)
 
-                items.append(PersistenceItem(
+                outcome.items.append(PersistenceItem(
                     category: category,
                     name: name,
                     configPath: script,
@@ -55,6 +48,6 @@ public struct PeriodicScanner: PersistenceScanner {
             }
         }
 
-        return items
+        return outcome
     }
 }

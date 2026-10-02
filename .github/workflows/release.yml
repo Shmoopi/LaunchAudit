@@ -147,9 +147,18 @@ jobs:
 
       # ── Release ─────────────────────────────────────────────────────────
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # Pinned to a commit SHA rather than a mutable tag. This job has an
+        # unlocked Developer ID signing keychain in scope, so a third-party action
+        # repointed at new code would run with the signing identity available.
+        uses: softprops/action-gh-release@c062e08bd532815e2082a85e87e3ef29c3e6d191 # v2.0.8
         with:
-          draft: true
+          # Published, not draft.
+          #
+          # `draft: true` was the root cause of the broken Homebrew cask: a draft
+          # release never emits the `release: published` event, so update-cask.yml
+          # had never run once and the cask stayed pinned at 1.0.0 with a
+          # PLACEHOLDER_SHA256 — every `brew install --cask launchaudit` failed.
+          draft: false
           generate_release_notes: true
           files: |
             build/LaunchAudit-${{ steps.version.outputs.tag }}.dmg

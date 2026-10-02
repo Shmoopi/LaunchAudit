@@ -1,32 +1,22 @@
 import Foundation
 
-public struct AudioPluginScanner: PersistenceScanner {
+public struct AudioPluginScanner: BundleDirectoryScanner {
     public let category = PersistenceCategory.audioPlugins
-    public let requiresPrivilege = false
 
-    public var scanPaths: [String] {
-        ["/Library/Audio/Plug-Ins/HAL"]
-    }
+    /// `.plugin` and `.driver` are both loaded from the HAL directory; `Components`
+    /// holds Audio Units, which are loaded into every audio host process and were
+    /// previously not scanned at all.
+    public let bundleExtensions = ["plugin", "driver", "component"]
+
+    public let systemDirectories = [
+        "/Library/Audio/Plug-Ins/HAL",
+        "/Library/Audio/Plug-Ins/Components",
+    ]
+
+    public let userDirectorySuffixes = [
+        "Library/Audio/Plug-Ins/HAL",
+        "Library/Audio/Plug-Ins/Components",
+    ]
 
     public init() {}
-
-    public func scan() async throws -> [PersistenceItem] {
-        let scanner = DirectoryBundleScanner()
-        let (items, _) = scanner.scanBundles(
-            in: scanPaths,
-            bundleExtension: "plugin",
-            category: category,
-            owner: .system
-        )
-
-        // Also check for .driver bundles
-        let (driverItems, _) = scanner.scanBundles(
-            in: scanPaths,
-            bundleExtension: "driver",
-            category: category,
-            owner: .system
-        )
-
-        return items + driverItems
-    }
 }

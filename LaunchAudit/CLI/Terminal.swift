@@ -15,7 +15,12 @@ enum Terminal {
 
     /// Whether color output is enabled (respects NO_COLOR, pipe detection).
     nonisolated(unsafe) static var colorEnabled: Bool = {
-        if ProcessInfo.processInfo.environment["NO_COLOR"] != nil { return false }
+        let env = ProcessInfo.processInfo.environment
+        // A dumb terminal cannot render escapes even when it is a tty.
+        if env["TERM"] == "dumb" { return false }
+        if env["NO_COLOR"] != nil { return false }
+        // Let a pipe opt back in: `launchaudit scan | less -R` and CI log viewers.
+        if env["CLICOLOR_FORCE"] != nil || env["FORCE_COLOR"] != nil { return true }
         return isatty(STDOUT_FILENO) != 0
     }()
 
@@ -42,6 +47,56 @@ enum Terminal {
         return codes.joined() + text + reset
     }
 
+    /// Standard rule width. Every separator derives from this so the output does
+    /// not have a ragged right edge.
+    static let ruleWidth = 60
+
+    /// Strip control characters from untrusted text before it reaches a terminal.
+    ///
+    /// Item names, labels, paths, arguments and risk reasons all originate in
+    /// attacker-writable files (a launchd `Label`, a filename). Written raw, a
+    /// crafted name containing `ESC [ 2K ESC [ 1A` erases its own row and the row
+    /// above it, so a malicious entry can hide itself from `launchaudit scan`
+    /// output — and with a cursor-positioning prefix it can forge a neighbouring
+    /// row's "Signed: Yes (Apple)".
+    ///
+    /// `visibleWidth` only strips CSI for column math; it never removed the bytes.
+    static func sanitize(_ text: String) -> String {
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(text.unicodeScalars.count)
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            // C0 controls, except tab and newline which callers handle themselves.
+            case 0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F:
+                out.append("\u{FFFD}")
+            case 0x7F:                      // DEL
+                out.append("\u{FFFD}")
+            case 0x80...0x9F:               // C1, includes 8-bit CSI and OSC
+                out.append("\u{FFFD}")
+            // Bidi overrides: a cheap way to make `evil.plist` render reversed.
+            case 0x202A...0x202E, 0x2066...0x2069:
+                out.append("\u{FFFD}")
+            default:
+                out.append(scalar)
+            }
+        }
+        return String(out)
+    }
+
+    /// Truncate in the middle, keeping both ends.
+    ///
+    /// Reverse-DNS labels and paths — the dominant name shape in this tool — carry
+    /// their distinguishing part at the end, so `prefix(30)` cut off exactly the
+    /// bytes that tell `com.adobe.acc.installer.v2` from
+    /// `com.adobe.acc.installer.updater`, and marked nothing.
+    static func middleTruncate(_ text: String, to width: Int) -> String {
+        guard width > 1, text.count > width else { return text }
+        let keep = width - 1
+        let head = keep - keep / 2
+        let tail = keep / 2
+        return String(text.prefix(head)) + "\u{2026}" + String(text.suffix(tail))
+    }
+
     /// Visible (printable) width of a string, stripping ANSI escape sequences.
     static func visibleWidth(_ text: String) -> Int {
         let stripped = text.replacingOccurrences(
@@ -59,33 +114,77 @@ enum Terminal {
         return text + String(repeating: " ", count: width - visible)
     }
 
-    static func riskStyled(_ level: RiskLevel) -> String {
-        let label = level.displayName.uppercased()
+    /// 256-color orange for High, matching the GUI and the HTML report.
+    ///
+    /// High used to be plain red (31) and Critical bright red (91), distinguished
+    /// only by the bright bit — which many terminal themes render nearly
+    /// identically, or invert on a light background. That made the two most
+    /// important severities unreliable to tell apart while triaging.
+    private static let orange = "\u{001B}[38;5;208m"
+
+    private static func riskCodes(_ level: RiskLevel) -> [String] {
         switch level {
-        case .critical:      return styled(label, bold, brightRed)
-        case .high:          return styled(label, bold, red)
-        case .medium:        return styled(label, yellow)
-        case .low:           return styled(label, green)
-        case .informational: return styled(label, dim)
+        case .critical:      return [bold, brightRed]
+        case .high:          return [bold, orange]
+        case .medium:        return [yellow]
+        case .low:           return [green]
+        case .informational: return [dim]
         }
     }
 
-    static func riskBadge(_ level: RiskLevel) -> String {
-        let label = level.displayName.uppercased()
-        let padded = label.padding(toLength: 13, withPad: " ", startingAt: 0)
+    /// Single-character severity marker, so severity survives a `--no-color` run
+    /// or a color-blind reader.
+    static func riskMarker(_ level: RiskLevel) -> String {
         switch level {
-        case .critical:      return styled(padded, bold, brightRed)
-        case .high:          return styled(padded, bold, red)
-        case .medium:        return styled(padded, yellow)
-        case .low:           return styled(padded, green)
-        case .informational: return styled(padded, dim)
+        case .critical:      return "!!"
+        case .high:          return "! "
+        case .medium:        return "* "
+        case .low:           return "+ "
+        case .informational: return "  "
         }
+    }
+
+    static func riskStyled(_ level: RiskLevel) -> String {
+        let label = level.displayName.uppercased()
+        guard colorEnabled else { return label }
+        return riskCodes(level).joined() + label + reset
+    }
+
+    static func riskBadge(_ level: RiskLevel) -> String {
+        let label = riskMarker(level) + level.displayName.uppercased()
+        let padded = label.padding(toLength: 15, withPad: " ", startingAt: 0)
+        guard colorEnabled else { return padded }
+        return riskCodes(level).joined() + padded + reset
     }
 
     // MARK: - Print Helpers
 
+    /// When set, `write` appends here instead of printing. Used by
+    /// `renderTableOutput` to capture a report for writing to a file.
+    nonisolated(unsafe) static var capture: ((String) -> Void)?
+
+    /// When true, `write` emits to stderr. Used for diagnostics such as the usage
+    /// text, which must never contaminate a redirected stdout.
+    nonisolated(unsafe) static var routeOutputToStderr = false
+
     static func write(_ text: String) {
+        if let capture {
+            capture(text)
+            return
+        }
+        if routeOutputToStderr {
+            writeErr(text)
+            return
+        }
         print(text)
+    }
+
+    /// Run `body` with every `write` routed to stderr.
+    static func withStderrOutput(_ body: () -> Void) {
+        let previous = routeOutputToStderr
+        routeOutputToStderr = true
+        defer { routeOutputToStderr = previous }
+        body()
     }
 
     static func writeErr(_ text: String) {
@@ -121,13 +220,13 @@ enum Terminal {
 
     static func header(_ title: String) {
         write(styled(title, bold))
-        write(String(repeating: "-", count: min(title.count + 4, 60)))
+        write(String(repeating: "-", count: ruleWidth))
     }
 
     static func sectionHeader(_ title: String) {
         write("")
         write(styled(title, bold, cyan))
-        write(String(repeating: "-", count: 60))
+        write(String(repeating: "-", count: ruleWidth))
     }
 
     static func keyValue(_ key: String, _ value: String, indent: Int = 2) {
@@ -141,10 +240,10 @@ enum Terminal {
     static func printScanHeader(_ result: ScanResult) {
         write("")
         write(styled("LaunchAudit v\(appVersion)", bold) + styled(" -- macOS Persistence Auditor", dim))
-        write(String(repeating: "=", count: 60))
+        write(String(repeating: "=", count: ruleWidth))
         write("")
-        keyValue("Host", result.hostname)
-        keyValue("OS", result.osVersion)
+        keyValue("Host", sanitize(result.hostname))
+        keyValue("OS", sanitize(result.osVersion))
         keyValue("Scanned", result.scanDate.formatted(
             .dateTime.year().month().day().hour().minute().second()
         ))
@@ -154,7 +253,7 @@ enum Terminal {
 
     static func printRiskSummary(_ result: ScanResult, hideApple: Bool) {
         let items = hideApple
-            ? result.items.filter { !$0.isAppleSignedAndNotarized }
+            ? result.items.filter { !$0.isVerifiedAppleSoftware }
             : result.items
 
         let counts: [(RiskLevel, Int)] = RiskLevel.allCases.reversed().map { level in
@@ -162,7 +261,10 @@ enum Terminal {
         }
         let total = items.count
         let thirdParty = items.filter { !$0.source.isApple }.count
+        // "Unsigned" and "could not be verified" are different facts. Conflating
+        // them is why the GUI and the CLI reported different totals for one machine.
         let unsigned = items.filter { $0.signingInfo?.isSigned == false }.count
+        let unverified = items.filter { $0.signingInfo == nil }.count
 
         sectionHeader("RISK SUMMARY")
         write("")
@@ -177,7 +279,29 @@ enum Terminal {
         write("  \(styled("Total:", dim))         \(styled(String(total), bold)) items")
         write("  \(styled("Third-party:", dim))    \(thirdParty)")
         write("  \(styled("Unsigned:", dim))       \(unsigned)")
+        write("  \(styled("Unverified:", dim))     \(unverified)")
         write("")
+
+        // Coverage. A reader has to know whether "0 items" means clean or blind.
+        if result.hasCoverageGaps {
+            let blocked = result.categoriesBlockedByPermissions
+            write("  " + styled("Coverage:", bold + yellow))
+            if !result.ranAsRoot {
+                write("    - not run as root; re-run with sudo for full coverage")
+            }
+            if !blocked.isEmpty {
+                let names = blocked.map(\.displayName).sorted().joined(separator: ", ")
+                write("    - categories needing privileges: \(names)")
+            }
+            if !result.hadAuthoritativeLaunchdState {
+                write("    - launchd override database unreadable; enabled/disabled "
+                      + "state comes from each plist and may be wrong")
+            }
+            if !result.appliedFilters.isEmpty {
+                write("    - filters applied: \(result.appliedFilters.joined(separator: "; "))")
+            }
+            write("")
+        }
     }
 
     static func printAttentionItems(_ items: [PersistenceItem]) {
@@ -192,27 +316,52 @@ enum Terminal {
 
         for item in attention {
             let badge = riskStyled(item.riskLevel)
-            write("  \(styled(">", bold)) \(styled(item.name, bold))  \(badge)")
+            write("  \(styled(">", bold)) \(styled(sanitize(item.name), bold))  \(badge)")
 
             keyValue("Category", item.category.displayName, indent: 4)
 
             if let config = item.configPath {
-                keyValue("Config", config, indent: 4)
+                keyValue("Config", sanitize(config), indent: 4)
             }
             if let exec = item.executablePath {
-                keyValue("Executable", exec, indent: 4)
+                keyValue("Executable", sanitize(exec), indent: 4)
+            }
+            if let payload = item.interpretedPayload {
+                keyValue("Runs", sanitize(middleTruncate(payload.displayText, to: 120)), indent: 4)
             }
             if let signing = item.signingInfo {
-                let status = signing.isSigned
-                    ? (signing.isNotarized ? "Yes (notarized)" : "Yes (not notarized)")
-                    : "No"
+                let status: String
+                if !signing.isSigned {
+                    status = "No"
+                } else if signing.isAppleSigned {
+                    status = "Yes (Apple)"
+                } else if signing.isNotarized {
+                    status = "Yes (notarized)"
+                } else if signing.isAdHocSigned {
+                    status = "Yes (ad-hoc, no identity)"
+                } else {
+                    status = "Yes (not notarized)"
+                }
                 keyValue("Signed", status, indent: 4)
+            } else {
+                keyValue("Signed", "not verified", indent: 4)
             }
             if !item.riskReasons.isEmpty {
-                keyValue("Reasons", item.riskReasons[0], indent: 4)
+                keyValue("Reasons", sanitize(item.riskReasons[0]), indent: 4)
                 for reason in item.riskReasons.dropFirst() {
-                    write("                  \(reason)")
+                    write("                  \(sanitize(reason))")
                 }
+            }
+            // Mitigations are shown under their own heading so a Critical item does
+            // not appear to list its own reassurances as warnings.
+            if !item.riskMitigations.isEmpty {
+                keyValue("Mitigating", sanitize(item.riskMitigations[0]), indent: 4)
+                for note in item.riskMitigations.dropFirst() {
+                    write("                  \(sanitize(note))")
+                }
+            }
+            if let guidance = item.category.investigationHint {
+                keyValue("Next step", guidance, indent: 4)
             }
             write("")
         }
@@ -224,38 +373,45 @@ enum Terminal {
         let sorted = items.sorted { $0.riskLevel > $1.riskLevel }
         let countStr = "\(items.count) item\(items.count == 1 ? "" : "s")"
 
+        let title = "-- \(category.displayName) (\(countStr)) "
         write("")
-        write(styled("-- \(category.displayName) (\(countStr)) ", bold)
-              + String(repeating: "-", count: max(0, 50 - category.displayName.count)))
+        write(styled(title, bold)
+              + String(repeating: "-", count: max(0, ruleWidth - title.count)))
         write("")
 
         // Column headers
-        let hRisk   = "RISK".padding(toLength: 14, withPad: " ", startingAt: 0)
+        let hRisk   = "RISK".padding(toLength: 16, withPad: " ", startingAt: 0)
         let hName   = "NAME".padding(toLength: 32, withPad: " ", startingAt: 0)
-        let hSigned = "SIGNED".padding(toLength: 8, withPad: " ", startingAt: 0)
+        let hSigned = "SIGNED".padding(toLength: 10, withPad: " ", startingAt: 0)
         let hSource = "SOURCE"
         write("  \(styled(hRisk + hName + hSigned + hSource, dim))")
 
         for item in sorted {
-            let risk = padded(riskStyled(item.riskLevel), toWidth: 14)
-            let name = String(item.name.prefix(30))
+            let risk = padded(riskBadge(item.riskLevel), toWidth: 16)
+            let name = sanitize(middleTruncate(item.name, to: 30))
                 .padding(toLength: 32, withPad: " ", startingAt: 0)
             let signed: String
             if let info = item.signingInfo {
-                signed = info.isSigned ? "Yes" : styled("No", red)
+                if !info.isSigned {
+                    signed = styled("No", red)
+                } else if info.isAppleSigned {
+                    signed = "Apple"
+                } else if info.isNotarized {
+                    signed = "Notarized"
+                } else if info.isAdHocSigned {
+                    signed = styled("Ad-hoc", yellow)
+                } else {
+                    signed = styled("Signed", yellow)
+                }
             } else {
-                signed = styled("--", dim)
+                // Explicitly "not verified", not an ambiguous dash.
+                signed = styled("unverified", dim)
             }
-            let signedCol = padded(signed, toWidth: 8)
-            let source = item.source.displayName
+            let signedCol = padded(signed, toWidth: 10)
+            let source = sanitize(middleTruncate(item.source.displayName, to: 24))
 
             write("  \(risk)\(name)\(signedCol)\(source)")
         }
-    }
-
-    /// Risk label with ANSI color, returns raw width of the visible text.
-    private static func riskLabel(_ level: RiskLevel) -> String {
-        riskStyled(level)
     }
 
     static func printErrors(_ errors: [ScanError]) {
@@ -268,9 +424,10 @@ enum Terminal {
             let prefix = err.isPermissionDenied
                 ? styled("[Permission Denied]", yellow)
                 : styled("[Error]", red)
-            write("  \(prefix) \(err.category.displayName): \(err.message)")
+            let scope = err.category?.displayName ?? "Scan"
+            write("  \(prefix) \(scope): \(sanitize(err.message))")
             if let path = err.path {
-                write("    \(styled(path, dim))")
+                write("    \(styled(sanitize(path), dim))")
             }
         }
         write("")
@@ -280,21 +437,28 @@ enum Terminal {
 
     static func printItemVerbose(_ item: PersistenceItem) {
         let badge = riskStyled(item.riskLevel)
-        write("  \(styled(">", bold)) \(styled(item.name, bold))  \(badge)")
+        write("  \(styled(">", bold)) \(styled(sanitize(item.name), bold))  \(badge)")
 
         keyValue("Category", item.category.displayName, indent: 4)
+        if !item.category.attackTechniques.isEmpty {
+            keyValue("ATT&CK", item.category.attackTechniques.joined(separator: ", "), indent: 4)
+        }
 
         if let label = item.label {
-            keyValue("Label", label, indent: 4)
+            keyValue("Label", sanitize(label), indent: 4)
         }
         if let config = item.configPath {
-            keyValue("Config", config, indent: 4)
+            keyValue("Config", sanitize(config), indent: 4)
         }
         if let exec = item.executablePath {
-            keyValue("Executable", exec, indent: 4)
+            keyValue("Executable", sanitize(exec), indent: 4)
         }
         if !item.arguments.isEmpty {
-            keyValue("Arguments", item.arguments.joined(separator: " "), indent: 4)
+            keyValue("Arguments", sanitize(item.arguments.joined(separator: " ")), indent: 4)
+        }
+        if let payload = item.interpretedPayload {
+            keyValue("Interpreted", sanitize(middleTruncate(payload.displayText, to: 160)),
+                     indent: 4)
         }
 
         keyValue("Status", item.isEnabled ? "Enabled" : styled("Disabled", dim), indent: 4)
@@ -348,7 +512,7 @@ enum Terminal {
 
     static func printQuiet(_ result: ScanResult, hideApple: Bool) {
         let items = hideApple
-            ? result.items.filter { !$0.isAppleSignedAndNotarized }
+            ? result.items.filter { !$0.isVerifiedAppleSoftware }
             : result.items
 
         let critical = items.filter { $0.riskLevel == .critical }.count
@@ -357,7 +521,66 @@ enum Terminal {
         let low = items.filter { $0.riskLevel == .low }.count
         let info = items.filter { $0.riskLevel == .informational }.count
 
-        write("critical=\(critical) high=\(high) medium=\(medium) low=\(low) info=\(info) total=\(items.count)")
+        // `errors`, `skipped` and `root` are included so a CI job can tell a clean
+        // scan from a blind one. Without them a scan that saw nothing looked
+        // identical to a scan that found nothing.
+        let denied = result.errors.filter(\.isPermissionDenied)
+        let skipped = Set(denied.compactMap(\.category)).count
+        write(
+            "critical=\(critical) high=\(high) medium=\(medium) low=\(low) "
+            + "info=\(info) total=\(items.count) "
+            + "errors=\(result.errors.count) skipped=\(skipped) "
+            + "root=\(result.ranAsRoot ? 1 : 0)"
+        )
+    }
+
+    // MARK: - Rendered (capturable) table output
+
+    /// Render the full table report into a string.
+    ///
+    /// `-o report.txt` used to print to the terminal and write nothing at all,
+    /// silently, with exit status 0. Rendering to a buffer lets the same output go
+    /// to a file.
+    static func renderTableOutput(
+        _ result: ScanResult,
+        originalResult: ScanResult,
+        verbose: Bool,
+        isRoot: Bool
+    ) -> String {
+        var buffer: [String] = []
+        let previousColor = colorEnabled
+        // A file gets plain text; escape sequences in a saved report are noise.
+        colorEnabled = false
+        capture = { buffer.append($0) }
+        defer {
+            capture = nil
+            colorEnabled = previousColor
+        }
+
+        printScanHeader(result)
+        printRiskSummary(result, hideApple: false)
+        printAttentionItems(result.items)
+        sectionHeader("ALL ITEMS BY CATEGORY")
+        let grouped = Dictionary(grouping: result.items, by: \.category)
+        for category in PersistenceCategory.allCases {
+            guard let items = grouped[category], !items.isEmpty else { continue }
+            if verbose {
+                let countStr = "\(items.count) item\(items.count == 1 ? "" : "s")"
+                let title = "-- \(category.displayName) (\(countStr)) "
+                write("")
+                write(title + String(repeating: "-", count: max(0, ruleWidth - title.count)))
+                write("")
+                for item in items.sorted(by: { $0.riskLevel > $1.riskLevel }) {
+                    printItemVerbose(item)
+                }
+            } else {
+                printCategoryTable(items, category: category)
+            }
+        }
+        printErrors(originalResult.errors)
+        printFooter(result, isRoot: isRoot)
+
+        return buffer.joined(separator: "\n") + "\n"
     }
 
     // MARK: - Category / Group Listing
@@ -412,7 +635,7 @@ enum Terminal {
 
     static func printFooter(_ result: ScanResult, isRoot: Bool) {
         write("")
-        write(String(repeating: "=", count: 60))
+        write(String(repeating: "=", count: ruleWidth))
 
         let total = result.items.count
         let critical = result.items.filter { $0.riskLevel == .critical }.count
@@ -463,6 +686,12 @@ enum Terminal {
         write("")
         write("  Run \(styled("launchaudit help <command>", bold)) for command-specific options.")
         write("")
+        write(styled("EXIT STATUS:", bold))
+        write("  0   Scan completed; nothing met --fail-on")
+        write("  1   Usage or I/O error")
+        write("  2   Findings met or exceeded --fail-on")
+        write("  3   Scan could not see everything it needed (only with --fail-on)")
+        write("")
     }
 
     static func printScanHelp() {
@@ -470,30 +699,40 @@ enum Terminal {
         write("  launchaudit scan [options]")
         write("")
         write(styled("OUTPUT OPTIONS:", bold))
-        write("  --format <fmt>        Output format: table, json, csv, html (default: table)")
+        write("  -f, --format <fmt>    Output format: table, json, csv, html (default: table)")
         write("  -o, --output <path>   Write output to file (format auto-detected from extension)")
-        write("  --no-color            Disable colored output")
+        write("  --no-color            Disable colored output (also honors NO_COLOR)")
         write("  --no-progress         Disable progress display")
-        write("  --quiet               Machine-readable summary (key=value pairs)")
+        write("  -q, --quiet           Machine-readable summary (key=value pairs)")
         write("  --verbose             Show full details for every item")
         write("")
         write(styled("FILTER OPTIONS:", bold))
-        write("  --show-apple          Include Apple-signed items (hidden by default)")
+        write("  --hide-apple          Hide Apple system items (default)")
+        write("  --show-apple          Include Apple system items")
         write("  --min-risk <level>    Minimum risk: informational, low, medium, high, critical")
         write("  --unsigned-only       Show only unsigned items")
         write("  --third-party         Show only third-party items")
-        write("  --search <query>      Filter items by text search")
+        write("  -s, --search <query>  Filter items by text search")
         write("  --category <id>       Only scan a specific category (repeatable)")
         write("  --group <name>        Only scan categories in a group (repeatable)")
+        write("")
+        write(styled("AUTOMATION:", bold))
+        write("  --fail-on <level>     Exit 2 when any item is at or above this level")
+        write("")
+        write(styled("EXIT STATUS:", bold))
+        write("  0   Scan completed; nothing met --fail-on")
+        write("  1   Usage or I/O error")
+        write("  2   Findings met or exceeded --fail-on")
+        write("  3   Scan lacked privileges to see everything (only with --fail-on)")
         write("")
         write(styled("EXAMPLES:", bold))
         write("  launchaudit scan")
         write("  launchaudit scan --min-risk high")
         write("  launchaudit scan --format json -o report.json")
         write("  launchaudit scan --unsigned-only --verbose")
-        write("  launchaudit scan --category launchDaemons --category launchAgents")
+        write("  launchaudit scan --category launchdaemons --category launchagents")
         write("  launchaudit scan --group \"System Services\"")
-        write("  launchaudit scan --third-party --format csv")
+        write("  sudo launchaudit scan --fail-on high --quiet   # CI gate")
         write("")
     }
 
@@ -502,7 +741,7 @@ enum Terminal {
         write("  launchaudit export <input.json> [options]")
         write("")
         write(styled("OPTIONS:", bold))
-        write("  --format <fmt>        Output format: json, csv, html (default: json)")
+        write("  -f, --format <fmt>    Output format: table, json, csv, html (default: table)")
         write("  -o, --output <path>   Write to file (format auto-detected from extension)")
         write("")
         write(styled("DESCRIPTION:", bold))

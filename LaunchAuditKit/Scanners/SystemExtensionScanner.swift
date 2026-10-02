@@ -10,80 +10,130 @@ public struct SystemExtensionScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
 
-        // Query systemextensionsctl
-        if let output = await ProcessRunner.shared.tryRun(
-            "/usr/bin/systemextensionsctl", arguments: ["list"]
-        ) {
-            items.append(contentsOf: parseSystemExtensionsList(output))
+        guard let output = await ProcessRunner.shared.tryRun(
+            "/usr/bin/systemextensionsctl", arguments: ["list"], timeout: 10
+        ) else {
+            outcome.errors.append(ScanError(
+                category: category,
+                message: "systemextensionsctl list produced no output",
+                isPermissionDenied: false
+            ))
+            return outcome
         }
 
-        return items
+        outcome.items = parseSystemExtensionsList(output)
+        return outcome
     }
 
-    private func parseSystemExtensionsList(_ output: String) -> [PersistenceItem] {
+    /// Parse `systemextensionsctl list`.
+    ///
+    /// Real output is tab-separated:
+    /// ```
+    /// enabled	active	teamID	bundleID (version)	name	[state]
+    /// *	*	VBG97UB4TA	com.objective-see.lulu.extension (4.5.1/4.5.1)	LuLu	[activated enabled]
+    /// ```
+    /// The previous parser split on whitespace, discarded the name column and then
+    /// derived a name from the last dot-component of the bundle ID — so LuLu was
+    /// displayed as "extension" and ProtonVPN as "WireGuard-Extension".
+    func parseSystemExtensionsList(_ output: String) -> [PersistenceItem] {
         var items: [PersistenceItem] = []
 
         for line in output.components(separatedBy: "\n") {
+            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
+            // Skip the count line, category headers and the column header.
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty,
-                  !trimmed.hasPrefix("---"),
-                  !trimmed.hasPrefix("System Extensions") else { continue }
+            guard !trimmed.hasPrefix("---"),
+                  !trimmed.hasSuffix("extension(s)"),
+                  !trimmed.hasPrefix("enabled") else { continue }
 
-            // Lines typically look like:
-            // --- com.apple.system_extension.network_extension
-            // enabled	active	teamID	bundleID (version)	name	[state]
-            // * * TEAMID bundleID (1.0/1) identifer [activated ...]
+            let fields = line.components(separatedBy: "\t").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            // enabled, active, teamID, "bundleID (version)", name, [state]
+            guard fields.count >= 4 else { continue }
 
-            let parts = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
-            guard parts.count >= 4 else { continue }
+            let enabledFlag = fields[0] == "*"
+            let activeFlag = fields[1] == "*"
+            let teamID = fields[2].isEmpty ? nil : fields[2]
 
-            // Find the bundle identifier (contains dots, not a flag character)
-            var teamID: String?
-            var bundleID: String?
-            var extensionName: String?
-            var state: String?
+            // "bundleID (version)"
+            let identifierField = fields[3]
+            let bundleID = identifierField
+                .components(separatedBy: " ")
+                .first?
+                .trimmingCharacters(in: .whitespaces) ?? identifierField
+            guard !bundleID.isEmpty, bundleID.contains(".") else { continue }
 
-            for (i, part) in parts.enumerated() {
-                if part.count == 10 && part.allSatisfy({ $0.isLetter || $0.isNumber }) && teamID == nil && bundleID == nil {
-                    teamID = part
-                } else if part.contains(".") && !part.hasPrefix("(") && !part.hasPrefix("/") && bundleID == nil {
-                    bundleID = part
-                } else if part.hasPrefix("[") {
-                    state = parts[i...].joined(separator: " ")
-                        .replacingOccurrences(of: "[", with: "")
-                        .replacingOccurrences(of: "]", with: "")
-                    break
-                }
+            var version: String?
+            if let open = identifierField.firstIndex(of: "("),
+               let close = identifierField.lastIndex(of: ")"), open < close {
+                version = String(identifierField[identifierField.index(after: open)..<close])
             }
 
-            guard let id = bundleID else { continue }
-            extensionName = id.components(separatedBy: ".").last ?? id
+            let displayName = fields.count > 4 && !fields[4].isEmpty ? fields[4] : bundleID
+            let state = fields.count > 5
+                ? fields[5].trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+                : nil
 
-            let isEnabled = trimmed.contains("enabled") || trimmed.contains("activated")
-                || trimmed.hasPrefix("*")
+            // Resolve the on-disk bundle so the signature actually gets verified.
+            // Third-party system extensions are among the highest-privilege code
+            // on a Mac; previously none of them was checked at all because no
+            // executablePath was ever set.
+            let bundle = Self.locateBundle(bundleID: bundleID)
 
             var metadata: [String: PlistValue] = [
-                "RawLine": .string(trimmed),
-                "Source": .string("systemextensionsctl")
+                "Source": .string("systemextensionsctl"),
+                "Active": .bool(activeFlag),
             ]
-            if let s = state { metadata["State"] = .string(s) }
-            if let t = teamID { metadata["TeamID"] = .string(t) }
+            if let version { metadata["Version"] = .string(version) }
+            if let state { metadata["State"] = .string(state) }
+            if let teamID { metadata["TeamID"] = .string(teamID) }
+            if let bundle { metadata["BundlePath"] = .string(bundle.bundlePath) }
 
             items.append(PersistenceItem(
                 category: category,
-                name: extensionName ?? id,
-                label: id,
-                isEnabled: isEnabled,
+                name: displayName,
+                label: bundleID,
+                configPath: bundle?.bundlePath,
+                executablePath: bundle?.executablePath,
+                isEnabled: enabledFlag,
                 runContext: .boot,
                 owner: .system,
-                source: teamID != nil ? .thirdParty(teamID!) : .unknown,
+                source: teamID.map(ItemSource.thirdParty) ?? .unknown,
+                timestamps: bundle.map { PathUtilities.timestamps(for: $0.bundlePath) }
+                    ?? ItemTimestamps(),
                 rawMetadata: metadata
             ))
         }
 
         return items
+    }
+
+    /// Find the staged bundle for a system extension.
+    /// Layout: /Library/SystemExtensions/<UUID>/<bundleID>.systemextension
+    private static func locateBundle(
+        bundleID: String
+    ) -> (bundlePath: String, executablePath: String?)? {
+        let root = "/Library/SystemExtensions"
+        let wanted = "\(bundleID).systemextension"
+
+        for container in PathUtilities.listDirectories(in: root) {
+            let candidate = (container as NSString).appendingPathComponent(wanted)
+            guard PathUtilities.exists(candidate) else { continue }
+
+            var executablePath: String?
+            let infoPlist = (candidate as NSString)
+                .appendingPathComponent("Contents/Info.plist")
+            if let dict = try? PlistParser().parse(at: infoPlist),
+               let execName = dict["CFBundleExecutable"] as? String {
+                executablePath = (candidate as NSString)
+                    .appendingPathComponent("Contents/MacOS/\(execName)")
+            }
+            return (candidate, executablePath)
+        }
+        return nil
     }
 }

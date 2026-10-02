@@ -10,7 +10,7 @@ public struct ReopenAtLoginScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         var items: [PersistenceItem] = []
 
         // Check TALAppsToRelaunchAtLogin in loginwindow plist
@@ -51,8 +51,11 @@ public struct ReopenAtLoginScanner: PersistenceScanner {
         if PathUtilities.exists(savedStateDir) {
             let stateDirs = PathUtilities.listDirectories(in: savedStateDir)
             for stateDir in stateDirs {
-                let bundleID = (stateDir as NSString).lastPathComponent
-                    .replacingOccurrences(of: ".savedState", with: "")
+                // `deletingPathExtension` strips only the trailing extension;
+                // `replacingOccurrences` removed every occurrence, corrupting a
+                // bundle ID that happened to contain the substring.
+                let bundleID = ((stateDir as NSString).lastPathComponent as NSString)
+                    .deletingPathExtension
                 let timestamps = PathUtilities.timestamps(for: stateDir)
 
                 items.append(PersistenceItem(
@@ -70,6 +73,6 @@ public struct ReopenAtLoginScanner: PersistenceScanner {
             }
         }
 
-        return items
+        return ScanOutcome(items: items)
     }
 }

@@ -4,59 +4,81 @@ public struct InputMethodScanner: PersistenceScanner {
     public let category = PersistenceCategory.inputMethods
     public let requiresPrivilege = false
 
+    private let inputMethodSystemDirs = ["/Library/Input Methods"]
+    private let inputMethodUserSuffix = "Library/Input Methods"
+    private let inputManagerSystemDirs = ["/Library/InputManagers"]
+    private let inputManagerUserSuffix = "Library/InputManagers"
+
     public var scanPaths: [String] {
-        [
-            "/Library/Input Methods",
-            PathUtilities.expandTilde("~/Library/Input Methods"),
-            "/Library/InputManagers",
-            PathUtilities.expandTilde("~/Library/InputManagers")
-        ]
+        var paths = inputMethodSystemDirs + inputManagerSystemDirs
+        for (_, home) in PathUtilities.scannableHomeDirectories() {
+            paths.append((home as NSString).appendingPathComponent(inputMethodUserSuffix))
+            paths.append((home as NSString).appendingPathComponent(inputManagerUserSuffix))
+        }
+        return paths
     }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         let bundleScanner = DirectoryBundleScanner()
-        var allItems: [PersistenceItem] = []
+        var outcome = ScanOutcome()
 
-        // Input Methods (.app bundles in Input Methods directories)
-        for dir in ["/Library/Input Methods",
-                    PathUtilities.expandTilde("~/Library/Input Methods")] {
-            guard PathUtilities.exists(dir) else { continue }
-            let owner: ItemOwner = dir.hasPrefix("/Library") ? .system : .user(PathUtilities.currentUser)
-            let (items, _) = bundleScanner.scanBundles(
+        // Input methods are .app bundles.
+        outcome.merge(bundleScanner.scanBundles(
+            in: inputMethodSystemDirs,
+            bundleExtension: "app",
+            category: category,
+            owner: .system,
+            runContext: .login
+        ))
+        for (user, home) in PathUtilities.scannableHomeDirectories() {
+            let dir = (home as NSString).appendingPathComponent(inputMethodUserSuffix)
+            outcome.merge(bundleScanner.scanBundles(
                 in: [dir],
                 bundleExtension: "app",
                 category: category,
-                owner: owner
-            )
-            allItems.append(contentsOf: items)
+                owner: .user(user),
+                runContext: .login
+            ))
         }
 
-        // InputManagers (deprecated, known attack vector)
-        for dir in ["/Library/InputManagers",
-                    PathUtilities.expandTilde("~/Library/InputManagers")] {
-            guard PathUtilities.exists(dir) else { continue }
-            let owner: ItemOwner = dir.hasPrefix("/Library") ? .system : .user(PathUtilities.currentUser)
-            let subdirs = PathUtilities.listDirectories(in: dir)
-            for subdir in subdirs {
-                let name = (subdir as NSString).lastPathComponent
-                let timestamps = PathUtilities.timestamps(for: subdir)
-                allItems.append(PersistenceItem(
+        // InputManagers: removed from macOS long ago and a classic injection
+        // vector, so any hit is critical. `RiskClassifier` keys the critical
+        // escalation on the `Deprecated` metadata flag set below.
+        var managerDirectories: [(String, ItemOwner)] =
+            inputManagerSystemDirs.map { ($0, .system) }
+        for (user, home) in PathUtilities.scannableHomeDirectories() {
+            managerDirectories.append(
+                ((home as NSString).appendingPathComponent(inputManagerUserSuffix), .user(user))
+            )
+        }
+
+        for (directory, owner) in managerDirectories {
+            let (subdirs, errors) = entries(in: directory, includeDirectories: true)
+            outcome.errors += errors
+            for subdir in subdirs where PathUtilities.isDirectory(subdir) {
+                outcome.items.append(PersistenceItem(
                     category: category,
-                    name: name,
+                    name: (subdir as NSString).lastPathComponent,
                     configPath: subdir,
                     isEnabled: true,
                     runContext: .login,
                     owner: owner,
                     riskLevel: .high,
-                    riskReasons: ["Uses deprecated InputManagers mechanism — known malware vector"],
-                    timestamps: timestamps,
-                    rawMetadata: ["Type": .string("InputManager"), "Deprecated": .bool(true)]
+                    riskReasons: [
+                        "Uses the deprecated InputManagers mechanism — a known "
+                            + "code-injection vector that modern macOS does not load",
+                    ],
+                    timestamps: PathUtilities.timestamps(for: subdir),
+                    rawMetadata: [
+                        "Type": .string("InputManager"),
+                        "Deprecated": .bool(true),
+                    ]
                 ))
             }
         }
 
-        return allItems
+        return outcome
     }
 }

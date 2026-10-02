@@ -3,6 +3,14 @@ name: Update Homebrew Cask
 on:
   release:
     types: [published]
+  # Lets a cask that missed its release (for example one published as a draft) be
+  # regenerated without cutting a new version.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to sync the cask to (e.g. v1.2.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,7 +19,7 @@ jobs:
   update-cask:
     name: Update Cask Formula
     runs-on: macos-15
-    if: "!github.event.release.prerelease"
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
 
     steps:
       - name: Checkout
@@ -19,38 +27,101 @@ jobs:
         with:
           ref: main
 
-      - name: Get Release Info
+      # Event data is passed through `env`, never interpolated into the script.
+      #
+      # `${{ }}` is expanded by the runner *before* bash sees the line, so a tag
+      # containing `$(...)`, backticks or `;` used to execute in this job — and a
+      # tag name is arbitrary attacker-chosen text when a release is created
+      # through the REST API. Git's own ref rules permit all of those characters.
+      - name: Resolve and validate tag
         id: release
+        env:
+          RAW_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          VERSION="${{ github.event.release.tag_name }}"
-          VERSION="${VERSION#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ ! "$RAW_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Refusing to act on unexpected tag name: $RAW_TAG"
+            exit 1
+          fi
+          printf 'tag=%s\n'     "$RAW_TAG"     >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Download Release ZIP
-        run: |
-          gh release download "${{ github.event.release.tag_name }}" \
-            --pattern "LaunchAudit-${{ github.event.release.tag_name }}.zip" \
-            --dir /tmp
+      - name: Download release archive
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "LaunchAudit-${TAG}.zip" \
+            --dir /tmp
 
       - name: Calculate SHA-256
         id: sha
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
-          SHA=$(shasum -a 256 /tmp/LaunchAudit-${{ github.event.release.tag_name }}.zip | awk '{print $1}')
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          SHA=$(shasum -a 256 "/tmp/LaunchAudit-${TAG}.zip" | awk '{print $1}')
+          printf 'sha256=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
           echo "SHA-256: $SHA"
 
-      - name: Update Cask Formula
+      # Rewritten with Ruby rather than `sed`, so a `/` in a substituted value
+      # cannot terminate the expression and corrupt the file.
+      - name: Update cask
+        env:
+          NEW_VERSION: ${{ steps.release.outputs.version }}
+          NEW_SHA: ${{ steps.sha.outputs.sha256 }}
         run: |
-          sed -i '' "s/version \".*\"/version \"${{ steps.release.outputs.version }}\"/" Casks/launchaudit.rb
-          sed -i '' "s/sha256 \".*\"/sha256 \"${{ steps.sha.outputs.sha256 }}\"/" Casks/launchaudit.rb
+          set -euo pipefail
+          ruby -e '
+            path = "Casks/launchaudit.rb"
+            body = File.read(path)
+            version = ENV.fetch("NEW_VERSION")
+            sha     = ENV.fetch("NEW_SHA")
 
-      - name: Commit Updated Cask
+            abort("unexpected version format: #{version}") unless version =~ /\A\d+\.\d+\.\d+\z/
+            abort("unexpected sha format") unless sha =~ /\A[0-9a-f]{64}\z/
+
+            body = body.sub(/^  version ".*"$/,  %(  version "#{version}"))
+            body = body.sub(/^  sha256 .*$/,     %(  sha256 "#{sha}"))
+            File.write(path, body)
+          '
+
+      # A cask that still contains a placeholder is worse than no cask: it fails
+      # for every user with a checksum mismatch. Catch it here rather than in a
+      # bug report.
+      - name: Verify cask is complete
+        env:
+          NEW_VERSION: ${{ steps.release.outputs.version }}
         run: |
+          set -euo pipefail
+          if grep -q "PLACEHOLDER" Casks/launchaudit.rb; then
+            echo "::error::Cask still contains a placeholder after substitution"
+            exit 1
+          fi
+          grep -q "version \"${NEW_VERSION}\"" Casks/launchaudit.rb
+          grep -Eq 'sha256 "[0-9a-f]{64}"' Casks/launchaudit.rb
+          ruby -c Casks/launchaudit.rb
+          cat Casks/launchaudit.rb
+
+      - name: Commit updated cask
+        env:
+          NEW_VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks/launchaudit.rb
-          git commit -m "Update Homebrew cask to ${{ steps.release.outputs.version }}"
-          git push
+          # `git commit` exits non-zero when nothing changed, which would fail the
+          # job on a re-run that is already up to date.
+          if git diff --cached --quiet; then
+            echo "Cask already up to date."
+            exit 0
+          fi
+          git commit -m "Update Homebrew cask to ${NEW_VERSION}"
+          # Rebase before pushing: the release may have been cut from a commit
+          # behind main.
+          git pull --rebase origin main
+          git push origin HEAD:main

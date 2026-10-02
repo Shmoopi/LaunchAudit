@@ -3,25 +3,25 @@ import Security
 
 /// Verifies code signatures. NOT an actor — verification is CPU-bound and
 /// safe to call from multiple tasks concurrently. The in-memory cache is
-/// protected by NSCache's internal thread-safety; the disk store has its
-/// own internal lock.
+/// protected by NSCache's internal thread-safety.
+///
+/// # Trust model
+///
+/// Trust decisions are made **only** by asking Security.framework to evaluate a
+/// code requirement. Certificate subject strings (`signingAuthority`) are
+/// captured for *display* and are never used to decide anything, because the
+/// subject Common Name is chosen by whoever issued the certificate and is
+/// therefore attacker-controlled.
+///
+/// Results are deliberately **not** persisted to disk. A cache in a location the
+/// audited user can write is a forgery primitive: malware running as that user
+/// could pre-seed "Apple-signed, notarized" verdicts for its own payload and the
+/// verifier would return them without ever consulting Security.framework.
 public final class SigningVerifier: Sendable {
 
     private let cache = InMemoryCache()
-    private let diskStore: DiskStore?
 
-    /// Default initializer — uses the user's Caches directory for persistence.
-    public init() {
-        self.diskStore = DiskStore.defaultStore()
-        diskStore?.warmInMemoryCache(cache)
-    }
-
-    /// Inject a custom cache directory (or `nil` to disable persistence).
-    /// Used by tests and for opting out of disk caching.
-    public init(cacheDirectory: URL?) {
-        self.diskStore = cacheDirectory.map { DiskStore(directory: $0) }
-        diskStore?.warmInMemoryCache(cache)
-    }
+    public init() {}
 
     /// Verify the code signature of a binary at the given path.
     /// Safe to call from any task — no actor serialization.
@@ -40,34 +40,24 @@ public final class SigningVerifier: Sendable {
         }
 
         let info = performVerification(path: path)
-        let entry = CacheEntry(modDate: modDate, info: info)
-        cache.setObject(entry, forKey: key)
-        diskStore?.record(path: path, modDate: modDate, info: info)
+        cache.setObject(CacheEntry(modDate: modDate, info: info), forKey: key)
         return info
-    }
-
-    /// Persist the in-memory cache delta to disk. Cheap if no new entries
-    /// have been added since the last flush.
-    public func flushDiskCache() {
-        diskStore?.flush()
     }
 
     // MARK: - Internal verification
 
     private func performVerification(path: String) -> SigningInfo {
-        // Suppress stderr noise from Security.framework
-        let originalStderr = dup(STDERR_FILENO)
-        let devNull = open("/dev/null", O_WRONLY)
-        if devNull >= 0 {
-            dup2(devNull, STDERR_FILENO)
-            close(devNull)
-        }
-        defer {
-            if originalStderr >= 0 {
-                dup2(originalStderr, STDERR_FILENO)
-                close(originalStderr)
-            }
-        }
+        // NOTE: stderr is deliberately left alone.
+        //
+        // This used to `dup2` /dev/null over fd 2 to hide Security.framework's
+        // validation chatter, saving and restoring the descriptor per call. Under
+        // the coordinator's 12-way concurrency that races: a later caller can
+        // snapshot fd 2 while it already points at /dev/null and then "restore"
+        // that, permanently discarding the process's stderr — which is where the
+        // CLI writes its banner, progress and "written to <path>" confirmation, and
+        // where a test harness collects results. Reference-counting fixed the race
+        // but not the fact that a library should not redirect a process-global
+        // descriptor at all. The chatter is cosmetic; losing stderr is not.
 
         let url = URL(fileURLWithPath: path) as CFURL
         var staticCode: SecStaticCode?
@@ -77,14 +67,29 @@ public final class SigningVerifier: Sendable {
             return .unsigned
         }
 
-        // Use kSecCSBasicValidateOnly for speed — full validation is very slow
-        // on large binaries because it hashes every page.
-        let validityStatus = SecStaticCodeCheckValidity(
-            code, SecCSFlags(rawValue: kSecCSBasicValidateOnly), nil
-        )
-        let isSigned = validityStatus == errSecSuccess
-
-        guard isSigned else {
+        // Validate the signature itself. Stronger than a basic check:
+        //   - kSecCSCheckAllArchitectures: validate every slice of a universal
+        //     binary, not just the host-native one. Without it, a fat Mach-O
+        //     with a good arm64 slice and a tampered x86_64 slice verifies clean
+        //     on Apple Silicon while Rosetta happily runs the bad slice.
+        //   - kSecCSStrictValidate: catch resource-envelope tricks.
+        // kSecCSCheckNestedCode is deliberately omitted — it is very slow on
+        // large app bundles and we verify nested helpers as their own items.
+        var flags = Self.validationFlags
+        let validityStatus = SecStaticCodeCheckValidity(code, flags, nil)
+        if validityStatus == errSecCSWeakResourceRules {
+            // A valid signature whose resource envelope uses legacy custom omit
+            // rules. XProtect ships this way (it updates its own definitions in
+            // place), and was reported as *unsigned*, which also kept it visible
+            // with Apple items hidden. Re-check with the main executable still
+            // under strict validation, so appended or altered code is caught
+            // exactly as before, but without the resource envelope; and accept
+            // it only as Apple's own platform signature.
+            flags = Self.weakResourceRulesValidationFlags
+            guard Self.satisfies(code, Requirements.shared.appleAnchor, flags: flags) else {
+                return .unsigned
+            }
+        } else if validityStatus != errSecSuccess {
             return .unsigned
         }
 
@@ -99,50 +104,40 @@ public final class SigningVerifier: Sendable {
 
         let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String
 
+        // Display-only. Never used for a trust decision — see the type doc.
         var authorities: [String] = []
         if let certs = info[kSecCodeInfoCertificates as String] as? [Any] {
-            for cert in certs {
-                if let secCert = cert as! SecCertificate? {
-                    if let name = SecCertificateCopySubjectSummary(secCert) as? String {
-                        authorities.append(name)
-                    }
+            for element in certs {
+                let ref = element as CFTypeRef
+                guard CFGetTypeID(ref) == SecCertificateGetTypeID() else { continue }
+                let cert = unsafeDowncast(ref as AnyObject, to: SecCertificate.self)
+                if let name = SecCertificateCopySubjectSummary(cert) as? String {
+                    authorities.append(name)
                 }
             }
         }
 
-        let isAppleSigned: Bool = {
-            guard let leaf = authorities.first else { return false }
-            if leaf == "Software Signing" { return true }
-            if leaf.hasPrefix("Apple ") { return true }
-            if leaf == "Software Update" { return true }
-            return false
-        }()
+        // The authoritative trust checks, evaluated by Security.framework.
+        //
+        //   "anchor apple"         → signed by Apple itself (platform binaries).
+        //   "anchor apple generic" → chains to an Apple root, i.e. Developer ID.
+        //   "notarized"            → carries a valid notarization ticket.
+        //
+        // Apple platform binaries are signed, not notarized — notarization is
+        // for third-party software — so `anchor apple` implies trusted without
+        // implying a notarization ticket exists.
+        let isAppleSigned = Self.satisfies(code, Requirements.shared.appleAnchor, flags: flags)
+        let isAppleIssued = Self.satisfies(code, Requirements.shared.appleGenericAnchor, flags: flags)
+        let isNotarized = Self.satisfies(code, Requirements.shared.notarized, flags: flags)
 
-        let isAdHoc = teamID == nil && authorities.isEmpty && isSigned
+        // Ad-hoc: a valid signature with no identity behind it at all.
+        let isAdHoc = !isAppleSigned && !isAppleIssued && teamID == nil
+
         let bundleID = info[kSecCodeInfoIdentifier as String] as? String
 
         var cdHash: String?
         if let uniqueID = info[kSecCodeInfoUnique as String] as? Data {
             cdHash = uniqueID.map { String(format: "%02x", $0) }.joined()
-        }
-
-        // Determine notarization. Order matters — each step is much cheaper
-        // than the last, so prefer the early-exit paths.
-        //
-        //   1. Apple-signed → always notarized (no work)
-        //   2. Ad-hoc → can never be notarized (no work)
-        //   3. csreq "notarized" check via Security.framework — local only,
-        //      uses stapled ticket if present (~1ms)
-        //   4. spctl --assess — last resort, contacts Apple (2s timeout)
-        let isNotarized: Bool
-        if isAppleSigned {
-            isNotarized = true
-        } else if isAdHoc {
-            isNotarized = false
-        } else if Self.checkNotarizedRequirement(code) {
-            isNotarized = true
-        } else {
-            isNotarized = checkNotarization(path: path)
         }
 
         return SigningInfo(
@@ -153,62 +148,88 @@ public final class SigningVerifier: Sendable {
             teamIdentifier: teamID,
             signingAuthority: authorities,
             bundleIdentifier: bundleID,
-            cdHash: cdHash
+            cdHash: cdHash,
+            entitlements: Self.riskyEntitlements(in: info)
         )
     }
 
-    /// Local-only notarization check via the csreq "notarized" requirement.
-    /// Returns true when the binary has a stapled notarization ticket.
-    /// Avoids the spctl subprocess entirely (no fork, no network).
-    private static func checkNotarizedRequirement(_ code: SecStaticCode) -> Bool {
+    private static let validationFlags = SecCSFlags(
+        rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate
+    )
+
+    /// Strict validation of every slice of the executable, without the resource
+    /// envelope. Used only for Apple code reporting `errSecCSWeakResourceRules`.
+    private static let weakResourceRulesValidationFlags = SecCSFlags(
+        rawValue: kSecCSCheckAllArchitectures | kSecCSStrictValidate | kSecCSDoNotValidateResources
+    )
+
+    /// Evaluate a pre-built code requirement against the binary.
+    private static func satisfies(
+        _ code: SecStaticCode,
+        _ requirement: SecRequirement?,
+        flags: SecCSFlags
+    ) -> Bool {
+        guard let requirement else { return false }
+        return SecStaticCodeCheckValidity(code, flags, requirement) == errSecSuccess
+    }
+
+    /// Entitlements that materially widen a binary's attack surface. A notarized
+    /// binary carrying these is a legitimate injection target, so the risk model
+    /// must be able to see them rather than capping on notarization alone.
+    private static let dangerousEntitlements: Set<String> = [
+        "com.apple.security.cs.disable-library-validation",
+        "com.apple.security.cs.allow-dyld-environment-variables",
+        "com.apple.security.cs.allow-unsigned-executable-memory",
+        "com.apple.security.cs.disable-executable-page-protection",
+        "com.apple.security.cs.allow-jit",
+        "com.apple.security.get-task-allow",
+        "com.apple.security.cs.debugger",
+    ]
+
+    private static func riskyEntitlements(in info: [String: Any]) -> [String] {
+        guard let data = info[kSecCodeInfoEntitlementsDict as String] as? [String: Any] else {
+            return []
+        }
+        var found: [String] = []
+        for (key, value) in data {
+            let isEnabled = (value as? Bool) ?? ((value as? NSNumber)?.boolValue ?? false)
+            guard isEnabled else { continue }
+            if dangerousEntitlements.contains(key) || key.hasPrefix("com.apple.private.") {
+                found.append(key)
+            }
+        }
+        return found.sorted()
+    }
+}
+
+// MARK: - Requirement cache
+
+/// Code requirements are immutable once built and safe to evaluate concurrently,
+/// so build each one once for the process lifetime.
+private final class Requirements: @unchecked Sendable {
+    static let shared = Requirements()
+
+    let appleAnchor: SecRequirement?
+    let appleGenericAnchor: SecRequirement?
+    let notarized: SecRequirement?
+
+    private init() {
+        appleAnchor = Self.make("anchor apple")
+        appleGenericAnchor = Self.make("anchor apple generic")
+        notarized = Self.make("notarized")
+    }
+
+    private static func make(_ text: String) -> SecRequirement? {
         var requirement: SecRequirement?
-        let createStatus = SecRequirementCreateWithString(
-            "notarized" as CFString, SecCSFlags(), &requirement
-        )
-        guard createStatus == errSecSuccess, let req = requirement else {
-            return false
-        }
-        let status = SecStaticCodeCheckValidity(
-            code, SecCSFlags(rawValue: kSecCSBasicValidateOnly), req
-        )
-        return status == errSecSuccess
-    }
-
-    /// Check notarization via spctl with a tight timeout. Last-resort fallback;
-    /// the SecRequirement fast-path above handles the common case.
-    private func checkNotarization(path: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/spctl")
-        process.arguments = ["--assess", "--type", "execute", path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-
-        let deadline = DispatchTime.now() + .seconds(2)
-        let semaphore = DispatchSemaphore(value: 0)
-
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            semaphore.signal()
-        }
-
-        if semaphore.wait(timeout: deadline) == .timedOut {
-            process.terminate()
-            return false
-        }
-
-        return process.terminationStatus == 0
+        guard SecRequirementCreateWithString(text as CFString, SecCSFlags(), &requirement)
+            == errSecSuccess else { return nil }
+        return requirement
     }
 }
 
 // MARK: - Cache types
 
-fileprivate final class CacheEntry {
+private final class CacheEntry {
     let modDate: Date?
     let info: SigningInfo
     init(modDate: Date?, info: SigningInfo) {
@@ -218,7 +239,7 @@ fileprivate final class CacheEntry {
 }
 
 /// Thread-safe wrapper for NSCache. NSCache is documented as thread-safe.
-fileprivate final class InMemoryCache: @unchecked Sendable {
+private final class InMemoryCache: @unchecked Sendable {
     private let storage = NSCache<NSString, CacheEntry>()
 
     func object(forKey key: NSString) -> CacheEntry? {
@@ -227,81 +248,5 @@ fileprivate final class InMemoryCache: @unchecked Sendable {
 
     func setObject(_ obj: CacheEntry, forKey key: NSString) {
         storage.setObject(obj, forKey: key)
-    }
-}
-
-// MARK: - Persistent disk store
-
-/// Persists signing-verification results across app launches.
-/// Storage format: a single plist `[String: Record]` keyed by absolute path.
-/// Atomic writes only happen on `flush()` so verification stays fast.
-fileprivate final class DiskStore: @unchecked Sendable {
-    private let storeURL: URL
-    private let lock = NSLock()
-    private var entries: [String: Record] = [:]
-    private var isDirty = false
-
-    init(directory: URL) {
-        self.storeURL = directory.appendingPathComponent("SigningCache.plist")
-        try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
-        self.entries = Self.load(from: storeURL)
-    }
-
-    static func defaultStore() -> DiskStore? {
-        let fm = FileManager.default
-        guard let cachesDir = try? fm.url(
-            for: .cachesDirectory, in: .userDomainMask, appropriateFor: nil, create: true
-        ) else {
-            return nil
-        }
-        let appDir = cachesDir.appendingPathComponent("LaunchAudit", isDirectory: true)
-        return DiskStore(directory: appDir)
-    }
-
-    /// Pre-populate the in-memory cache from the persisted dict so that the
-    /// first `verify()` calls hit instantly without going to disk.
-    func warmInMemoryCache(_ cache: InMemoryCache) {
-        lock.lock()
-        let snapshot = entries
-        lock.unlock()
-        for (path, record) in snapshot {
-            let entry = CacheEntry(modDate: record.modDate, info: record.info)
-            cache.setObject(entry, forKey: path as NSString)
-        }
-    }
-
-    func record(path: String, modDate: Date?, info: SigningInfo) {
-        lock.lock()
-        defer { lock.unlock() }
-        entries[path] = Record(modDate: modDate, info: info)
-        isDirty = true
-    }
-
-    func flush() {
-        lock.lock()
-        guard isDirty else {
-            lock.unlock()
-            return
-        }
-        let snapshot = entries
-        isDirty = false
-        lock.unlock()
-
-        guard let data = try? PropertyListEncoder().encode(snapshot) else {
-            return
-        }
-        try? data.write(to: storeURL, options: .atomic)
-    }
-
-    private static func load(from url: URL) -> [String: Record] {
-        guard let data = try? Data(contentsOf: url) else { return [:] }
-        return (try? PropertyListDecoder().decode([String: Record].self, from: data)) ?? [:]
-    }
-
-    fileprivate struct Record: Codable {
-        let modDate: Date?
-        let info: SigningInfo
     }
 }

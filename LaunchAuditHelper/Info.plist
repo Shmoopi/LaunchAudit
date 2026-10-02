@@ -7,7 +7,20 @@
 	<key>CFBundleName</key>
 	<string>LaunchAuditHelper</string>
 	<key>CFBundleVersion</key>
-	<string>1.1.0</string>
+	<string>1.2.0</string>
+	<!--
+	  SMAuthorizedClients is an SMJobBless key. This helper is registered with
+	  SMAppService.daemon(plistName:), which does not consult it, so it is
+	  documentation rather than an enforced control — the real check is
+	  HelperDelegate's setCodeSigningRequirement, which pins the team identifier
+	  read from the helper's own signature at runtime.
+
+	  Note what this requirement does and does not say: "identifier ... and anchor
+	  apple generic" constrains the bundle identifier but NOT the signer, so it is
+	  satisfied by any Developer ID-signed binary declaring that identifier — i.e.
+	  by anyone with an Apple developer account. Keep it in sync with the runtime
+	  requirement, and never treat it as the authorization boundary.
+	-->
 	<key>SMAuthorizedClients</key>
 	<array>
 		<string>identifier &quot;net.shmoopi.launchaudit&quot; and anchor apple generic</string>

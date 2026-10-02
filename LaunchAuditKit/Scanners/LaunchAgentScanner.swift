@@ -4,52 +4,50 @@ public struct LaunchAgentScanner: PersistenceScanner {
     public let category = PersistenceCategory.launchAgents
     public let requiresPrivilege = false
 
-    public var scanPaths: [String] {
+    private var systemDirectories: [String] {
         [
             "/System/Library/LaunchAgents",
+            "/Library/Apple/System/Library/LaunchAgents",
             "/Library/LaunchAgents",
-            PathUtilities.expandTilde("~/Library/LaunchAgents")
         ]
+    }
+
+    public var scanPaths: [String] {
+        var paths = systemDirectories
+        for (_, home) in PathUtilities.scannableHomeDirectories() {
+            paths.append((home as NSString).appendingPathComponent("Library/LaunchAgents"))
+        }
+        return paths
     }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         let helper = DirectoryPlistScanner()
-        var allItems: [PersistenceItem] = []
+        var outcome = ScanOutcome()
 
-        // System agents (Apple)
-        let (sysItems, _) = helper.scanPlists(
-            in: ["/System/Library/LaunchAgents"],
-            category: category,
-            owner: .system,
-            runContext: .login
-        )
-        allItems.append(contentsOf: sysItems.map { item in
-            var modified = item
-            modified.riskLevel = .informational
-            return modified
-        })
+        for directory in systemDirectories {
+            outcome.merge(helper.scanPlists(
+                in: [directory],
+                category: category,
+                owner: .system,
+                loadContext: .login
+            ))
+        }
 
-        // System-wide third-party agents
-        let (libItems, _) = helper.scanPlists(
-            in: ["/Library/LaunchAgents"],
-            category: category,
-            owner: .system,
-            runContext: .login
-        )
-        allItems.append(contentsOf: libItems)
+        // Every real account, not just the invoking one. Under `sudo` the
+        // invoking user's home is root's, so scanning only that directory made a
+        // privileged scan see *less* user data than an unprivileged one.
+        for (user, home) in PathUtilities.scannableHomeDirectories() {
+            let userDir = (home as NSString).appendingPathComponent("Library/LaunchAgents")
+            outcome.merge(helper.scanPlists(
+                in: [userDir],
+                category: category,
+                owner: .user(user),
+                loadContext: .login
+            ))
+        }
 
-        // Per-user agents
-        let userDir = PathUtilities.expandTilde("~/Library/LaunchAgents")
-        let (userItems, _) = helper.scanPlists(
-            in: [userDir],
-            category: category,
-            owner: .user(PathUtilities.currentUser),
-            runContext: .login
-        )
-        allItems.append(contentsOf: userItems)
-
-        return allItems
+        return outcome
     }
 }

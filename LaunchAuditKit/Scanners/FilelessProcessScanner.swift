@@ -3,19 +3,28 @@ import Darwin
 
 public struct FilelessProcessScanner: PersistenceScanner {
     public let category = PersistenceCategory.filelessProcesses
-    public let requiresPrivilege = true
+    /// `/bin/ps -axo` works unprivileged; only `proc_pidpath` on *other* users'
+    /// processes needs root. Marking the whole scanner privileged meant an
+    /// unprivileged headless scan skipped the tool's highest-severity detector
+    /// entirely.
+    public let requiresPrivilege = false
 
+    /// Enumerates running processes rather than a fixed set of paths.
     public var scanPaths: [String] { [] }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         // Single ps call covers PID, owner, and command — eliminates the
         // per-PID `ps -o user=` and `lsof -p` calls the previous version made.
         guard let psOutput = await ProcessRunner.shared.tryRun(
             "/bin/ps", arguments: ["-axo", "pid=,user=,comm="]
         ) else {
-            return []
+            return ScanOutcome(errors: [ScanError(
+                category: category,
+                message: "Could not enumerate running processes via /bin/ps",
+                isPermissionDenied: false
+            )])
         }
 
         var items: [PersistenceItem] = []
@@ -81,7 +90,7 @@ public struct FilelessProcessScanner: PersistenceScanner {
             ))
         }
 
-        return items
+        return ScanOutcome(items: items)
     }
 
     /// Resolve a PID's executable path via libproc — no subprocess.

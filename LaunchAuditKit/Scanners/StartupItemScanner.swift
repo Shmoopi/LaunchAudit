@@ -13,45 +13,54 @@ public struct StartupItemScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
 
         for directory in scanPaths {
-            guard PathUtilities.exists(directory) else { continue }
-            let subdirs = PathUtilities.listDirectories(in: directory)
+            let (subdirs, errors) = entries(in: directory, includeDirectories: true)
+            outcome.errors += errors
 
-            for subdir in subdirs {
+            for subdir in subdirs where PathUtilities.isDirectory(subdir) {
                 let name = (subdir as NSString).lastPathComponent
                 let startupScript = (subdir as NSString).appendingPathComponent(name)
-                let startupPlist = (subdir as NSString).appendingPathComponent("StartupParameters.plist")
-                let timestamps = PathUtilities.timestamps(for: subdir)
+                let startupPlist = (subdir as NSString)
+                    .appendingPathComponent("StartupParameters.plist")
+                let hasPlist = PathUtilities.exists(startupPlist)
 
                 var metadata: [String: PlistValue] = [
                     "Type": .string("StartupItem"),
-                    "Directory": .string(directory)
+                    "Directory": .string(directory),
                 ]
 
-                if PathUtilities.exists(startupPlist),
-                   let dict = try? PlistParser().parse(at: startupPlist) {
-                    metadata = PlistParser().toMetadata(dict)
+                // Merge rather than replace: assigning the parsed plist over the
+                // base dictionary discarded the Type and Directory keys set above.
+                if hasPlist, let dict = try? PlistParser().parse(at: startupPlist) {
+                    metadata.merge(PlistParser().toMetadata(dict)) { _, new in new }
                 }
 
-                items.append(PersistenceItem(
+                outcome.items.append(PersistenceItem(
                     category: category,
                     name: name,
-                    configPath: startupPlist,
+                    // Only claim a config path when the file is actually there;
+                    // otherwise the location dimension reasons about a path that
+                    // does not exist.
+                    configPath: hasPlist ? startupPlist : subdir,
                     executablePath: PathUtilities.exists(startupScript) ? startupScript : nil,
                     isEnabled: true,
                     runContext: .boot,
                     owner: .system,
                     riskLevel: .high,
-                    riskReasons: ["Uses deprecated StartupItems mechanism"],
-                    timestamps: timestamps,
+                    riskReasons: [
+                        "StartupItems were removed from macOS long ago and are no "
+                            + "longer executed by the system, so this entry was left "
+                            + "behind or planted",
+                    ],
+                    timestamps: PathUtilities.timestamps(for: subdir),
                     rawMetadata: metadata
                 ))
             }
         }
 
-        return items
+        return outcome
     }
 }

@@ -19,7 +19,11 @@ public enum PlistValue: Codable, Hashable, Sendable {
         case let n as NSNumber:
             if CFBooleanGetTypeID() == CFGetTypeID(n) {
                 self = .bool(n.boolValue)
-            } else if n.doubleValue != Double(n.intValue) {
+            } else if CFNumberIsFloatType(n as CFNumber) {
+                // Ask the number what it is rather than inferring from its value.
+                // Comparing `doubleValue != Double(intValue)` coerced a plist
+                // `<real>2.0</real>` into `.int(2)`, so JSON export lost the
+                // original type.
                 self = .double(n.doubleValue)
             } else {
                 self = .int(n.intValue)

@@ -21,19 +21,22 @@ enum AppEntry {
         Task { @MainActor in
             do {
                 let config = try CLIParser.parse(filteredArgv)
-                try await CLIRunner.execute(config)
+                let status = try await CLIRunner.execute(config)
+                Self.exitCLI(status)
             } catch let error as CLIError {
                 Terminal.error(error.message)
                 if error.showUsage {
-                    Terminal.write("")
-                    Terminal.printUsage()
+                    // Diagnostics go to stderr. Printing usage to stdout meant
+                    // `launchaudit scan --formt csv > items.csv` left the help text
+                    // sitting in the output file.
+                    Terminal.writeErr("")
+                    Terminal.withStderrOutput { Terminal.printUsage() }
                 }
                 Self.exitCLI(1)
             } catch {
                 Terminal.error(error.localizedDescription)
                 Self.exitCLI(1)
             }
-            Self.exitCLI(0)
         }
         dispatchMain()
     }

@@ -1,7 +1,8 @@
 import SwiftUI
 
 struct WelcomeView: View {
-    var onBeginAudit: () -> Void
+    var onBeginScan: () -> Void
+    var onDismiss: () -> Void
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -35,7 +36,7 @@ struct WelcomeView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             FeatureRow(
                                 icon: "checklist",
-                                title: "35 Persistence Categories",
+                                title: "\(PersistenceCategory.allCases.count) Persistence Categories",
                                 detail: "Launch daemons, login items, cron jobs, kernel extensions, browser extensions, and more"
                             )
                             FeatureRow(
@@ -89,20 +90,35 @@ struct WelcomeView: View {
                     .padding(2)
                 }
 
-                // Begin button
-                Button(action: onBeginAudit) {
-                    Label("Begin Audit", systemImage: "play.fill")
-                        .font(.headline)
-                        .frame(maxWidth: 220)
-                        .padding(.vertical, 4)
-                }
-                .controlSize(.large)
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                VStack(spacing: 8) {
+                    Button(action: onBeginScan) {
+                        Label("Begin Audit", systemImage: "play.fill")
+                            .font(.headline)
+                            .frame(maxWidth: 220)
+                            .padding(.vertical, 4)
+                    }
+                    .controlSize(.large)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
 
-                Text("You may be prompted for your password.")
+                    // An escape hatch. "Begin Audit" used to be the only control,
+                    // and with no `.cancelAction` button Escape did nothing either —
+                    // so a first-run user who wanted to read the docs first, or who
+                    // was not ready to approve a background item, was stuck.
+                    Button("Not Now", action: onDismiss)
+                        .buttonStyle(.link)
+                        .keyboardShortcut(.cancelAction)
+                }
+
+                // What actually happens: SMAppService shows a "Background Items
+                // Added" notification and needs a toggle in System Settings. There
+                // is no password prompt, and promising one left users waiting for a
+                // dialog that never appeared.
+                Text("macOS will ask you to approve a background helper in "
+                     + "System Settings \u{2014} there is no password prompt.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .multilineTextAlignment(.center)
                     .padding(.bottom, 8)
             }
             .padding(.horizontal, 24)

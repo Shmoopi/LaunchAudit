@@ -1,6 +1,10 @@
 import Foundation
-import SwiftUI
 
+/// Severity assigned to a persistence item.
+///
+/// Deliberately free of any UI framework import — presentation (colors, symbols,
+/// ANSI styling) lives with the presentation layer so the scanning library can be
+/// used headlessly.
 public enum RiskLevel: String, Codable, CaseIterable, Comparable, Identifiable, Hashable, Sendable {
     case informational
     case low
@@ -12,16 +16,6 @@ public enum RiskLevel: String, Codable, CaseIterable, Comparable, Identifiable, 
 
     public var displayName: String {
         rawValue.capitalized
-    }
-
-    public var color: Color {
-        switch self {
-        case .informational: return .secondary
-        case .low: return .green
-        case .medium: return .yellow
-        case .high: return .orange
-        case .critical: return .red
-        }
     }
 
     public var sortOrder: Int {
@@ -46,6 +40,17 @@ public enum RiskLevel: String, Codable, CaseIterable, Comparable, Identifiable, 
         case .medium: return .high
         case .high: return .critical
         case .critical: return .critical
+        }
+    }
+
+    /// Reduce risk by one level.
+    public var demoted: RiskLevel {
+        switch self {
+        case .critical: return .high
+        case .high: return .medium
+        case .medium: return .low
+        case .low: return .informational
+        case .informational: return .informational
         }
     }
 }

@@ -10,20 +10,30 @@ public struct BTMScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        // `sfltool dumpbtm` only produces useful output when run as root.
-        // Without root it hangs indefinitely on macOS 14+ — return empty
-        // immediately rather than wait for the timeout.
-        guard getuid() == 0 else { return [] }
-
-        // Even as root, cap at 5s — dumpbtm has occasionally been observed
-        // to stall on machines with corrupt BTM databases.
-        guard let output = await ProcessRunner.shared.tryRun(
-            "/usr/bin/sfltool", arguments: ["dumpbtm"], timeout: 5
-        ) else {
-            return []
+    public func scan() async throws -> ScanOutcome {
+        // `sfltool dumpbtm` needs root. Run it directly when we already are, and
+        // otherwise ask the privileged helper — which is the whole reason the user
+        // was asked to approve it. Failing that, report the gap explicitly rather
+        // than returning an empty list that reads as "nothing installed".
+        do {
+            let (output, route) = try await PrivilegedCommand.dumpBTM()
+            var outcome = ScanOutcome(items: parseBTMOutput(output))
+            if route == .helper {
+                for index in outcome.items.indices {
+                    outcome.items[index].rawMetadata["ReadVia"] = .string("privileged helper")
+                }
+            }
+            return outcome
+        } catch {
+            return ScanOutcome(errors: [ScanError(
+                category: category,
+                message: "Could not read Background Task Management: "
+                    + "\(error.localizedDescription). This category needs root — "
+                    + "either approve the LaunchAudit helper in System Settings → "
+                    + "General → Login Items & Extensions, or run `sudo launchaudit scan`.",
+                isPermissionDenied: true
+            )])
         }
-        return parseBTMOutput(output)
     }
 
     // MARK: - Parsing

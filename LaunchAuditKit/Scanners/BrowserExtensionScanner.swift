@@ -31,14 +31,176 @@ public struct BrowserExtensionScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
         // Run Safari, Chromium, and Firefox scans concurrently.
-        // Each browser is independent — there's no reason to serialize them.
-        async let safari = Task.detached { self.scanSafari() }.value
-        async let chromium = Task.detached { self.scanChromiumBrowsers() }.value
-        async let firefox = Task.detached { self.scanFirefox() }.value
+        //
+        // `async let` already creates a child task, so the previous
+        // `Task.detached { ... }.value` wrapper was redundant — and detached tasks
+        // do not inherit cancellation, so a cancelled scan kept walking the
+        // filesystem.
+        async let safari = scanSafari()
+        async let chromium = scanChromiumBrowsers()
+        async let firefox = scanFirefox()
 
-        return await safari + chromium + firefox
+        var outcome = ScanOutcome()
+        outcome.items = await safari + chromium + firefox
+        outcome.merge(scanNativeMessagingHosts())
+        outcome.merge(scanForcedExtensionPolicies())
+        return outcome
+    }
+
+    // MARK: - Native messaging hosts
+
+    /// Native messaging manifests name an **arbitrary local executable that the
+    /// browser will launch** on behalf of a web extension. That is a local
+    /// code-execution bridge, and it was not covered at all.
+    private func scanNativeMessagingHosts() -> ScanOutcome {
+        var outcome = ScanOutcome()
+
+        var directories: [(browser: String, path: String, owner: ItemOwner)] = [
+            ("Chrome", "/Library/Google/Chrome/NativeMessagingHosts", .system),
+            ("Chrome", "/Library/Application Support/Google/Chrome/NativeMessagingHosts", .system),
+            ("Firefox", "/Library/Application Support/Mozilla/NativeMessagingHosts", .system),
+            ("Edge", "/Library/Microsoft/Edge/NativeMessagingHosts", .system),
+        ]
+        for (user, home) in PathUtilities.scannableHomeDirectories() {
+            let suffixes = [
+                ("Chrome", "Library/Application Support/Google/Chrome/NativeMessagingHosts"),
+                ("Chromium", "Library/Application Support/Chromium/NativeMessagingHosts"),
+                ("Edge", "Library/Application Support/Microsoft Edge/NativeMessagingHosts"),
+                ("Brave",
+                 "Library/Application Support/BraveSoftware/Brave-Browser/NativeMessagingHosts"),
+                ("Firefox", "Library/Application Support/Mozilla/NativeMessagingHosts"),
+            ]
+            for (browser, suffix) in suffixes {
+                directories.append((
+                    browser,
+                    (home as NSString).appendingPathComponent(suffix),
+                    .user(user)
+                ))
+            }
+        }
+
+        for (browser, directory, owner) in directories {
+            let (files, errors) = entries(in: directory, withExtension: "json")
+            outcome.errors += errors
+
+            for file in files {
+                guard let data = try? SafeRead.data(atPath: file, maxBytes: 1024 * 1024),
+                      let json = try? JSONSerialization.jsonObject(with: data)
+                        as? [String: Any] else {
+                    outcome.errors.append(ScanError(
+                        category: category,
+                        path: file,
+                        message: "Could not parse native messaging manifest",
+                        isPermissionDenied: false
+                    ))
+                    continue
+                }
+
+                let name = json["name"] as? String
+                    ?? ((file as NSString).lastPathComponent as NSString).deletingPathExtension
+                // The executable the browser is allowed to launch.
+                let hostPath = json["path"] as? String
+
+                var metadata: [String: PlistValue] = [
+                    "Browser": .string(browser),
+                    "Type": .string("Native messaging host"),
+                ]
+                if let description = json["description"] as? String {
+                    metadata["Description"] = .string(description)
+                }
+                if let origins = json["allowed_origins"] as? [String] {
+                    metadata["AllowedOrigins"] = .array(origins.map { .string($0) })
+                }
+                if let extensions = json["allowed_extensions"] as? [String] {
+                    metadata["AllowedExtensions"] = .array(extensions.map { .string($0) })
+                }
+
+                var reasons = [
+                    "\(browser) can launch this executable on request from a web extension",
+                ]
+                if let hostPath, !PathUtilities.exists(hostPath) {
+                    reasons.append("Declared host binary is missing: \(hostPath)")
+                }
+
+                outcome.items.append(PersistenceItem(
+                    category: category,
+                    name: "\(browser) native host: \(name)",
+                    label: name,
+                    configPath: file,
+                    executablePath: hostPath,
+                    isEnabled: true,
+                    runContext: .onDemand,
+                    owner: owner,
+                    riskReasons: reasons,
+                    timestamps: PathUtilities.timestamps(for: file),
+                    rawMetadata: metadata
+                ))
+            }
+        }
+
+        return outcome
+    }
+
+    /// Extensions force-installed by policy.
+    ///
+    /// `ExtensionInstallForcelist` is how an MDM — or anyone who can install a
+    /// configuration profile — silently installs an extension that would otherwise
+    /// appear user-installed.
+    private func scanForcedExtensionPolicies() -> ScanOutcome {
+        var outcome = ScanOutcome()
+
+        let domains = [
+            ("Chrome", "/Library/Managed Preferences/com.google.Chrome.plist"),
+            ("Chrome", "/Library/Preferences/com.google.Chrome.plist"),
+            ("Edge", "/Library/Managed Preferences/com.microsoft.Edge.plist"),
+            ("Edge", "/Library/Preferences/com.microsoft.Edge.plist"),
+            ("Brave", "/Library/Managed Preferences/com.brave.Browser.plist"),
+        ]
+
+        for (browser, path) in domains {
+            guard PathUtilities.exists(path) else { continue }
+            guard let dict = try? PlistParser().parse(at: path) else {
+                outcome.errors.append(ScanError(
+                    category: category,
+                    path: path,
+                    message: "Could not read managed browser preferences",
+                    isPermissionDenied: !PathUtilities.isRoot
+                ))
+                continue
+            }
+            guard let forced = dict["ExtensionInstallForcelist"] as? [String],
+                  !forced.isEmpty else { continue }
+
+            for entry in forced {
+                // "<extension-id>;<update-url>"
+                let parts = entry.components(separatedBy: ";")
+                let extensionID = parts.first ?? entry
+                outcome.items.append(PersistenceItem(
+                    category: category,
+                    name: "\(browser) forced extension: \(extensionID)",
+                    label: extensionID,
+                    configPath: path,
+                    isEnabled: true,
+                    runContext: .login,
+                    owner: .system,
+                    riskLevel: .medium,
+                    riskReasons: [
+                        "Installed by policy and cannot be removed by the user",
+                        parts.count > 1 ? "Update URL: \(parts[1])" : "No update URL specified",
+                    ],
+                    timestamps: PathUtilities.timestamps(for: path),
+                    rawMetadata: [
+                        "Browser": .string(browser),
+                        "Type": .string("Policy-forced extension"),
+                        "PolicyDomain": .string(path),
+                    ]
+                ))
+            }
+        }
+
+        return outcome
     }
 
     // MARK: - Safari
@@ -51,7 +213,10 @@ public struct BrowserExtensionScanner: PersistenceScanner {
         // Also check the legacy Extensions directory
         let legacyDir = "\(home)/Library/Safari/Extensions"
         if PathUtilities.exists(legacyDir) {
-            for ext in PathUtilities.listFiles(in: legacyDir) {
+            // Only actual extension archives — a stray file (historically
+            // Extensions.plist itself) is not an extension.
+            for ext in PathUtilities.listFiles(in: legacyDir)
+            where ["safariextz", "appex"].contains((ext as NSString).pathExtension) {
                 let filename = (ext as NSString).lastPathComponent
                 let name = (filename as NSString).deletingPathExtension
                 let timestamps = PathUtilities.timestamps(for: ext)
@@ -158,7 +323,7 @@ public struct BrowserExtensionScanner: PersistenceScanner {
         let basePath: String
     }
 
-    private func scanChromiumBrowsers() -> [PersistenceItem] {
+    private func scanChromiumBrowsers() async -> [PersistenceItem] {
         let home = PathUtilities.homeDirectory
         let browsers: [ChromiumBrowser] = [
             .init(name: "Chrome", basePath: "\(home)/Library/Application Support/Google/Chrome"),
@@ -175,28 +340,15 @@ public struct BrowserExtensionScanner: PersistenceScanner {
         let installedBrowsers = browsers.filter { PathUtilities.exists($0.basePath) }
         guard !installedBrowsers.isEmpty else { return [] }
 
-        let count = installedBrowsers.count
-        // Sendable-safe shared buffer for results from concurrent workers.
-        let buffer = ConcurrentBuffer(count: count)
-        DispatchQueue.concurrentPerform(iterations: count) { i in
-            let items = self.scanOneChromiumBrowser(installedBrowsers[i])
-            buffer.set(i, items)
-        }
-        return buffer.flattened
-    }
-
-    /// Lock-protected fixed-capacity buffer for concurrentPerform results.
-    private final class ConcurrentBuffer: @unchecked Sendable {
-        private let lock = NSLock()
-        private var slots: [[PersistenceItem]]
-        init(count: Int) { self.slots = [[PersistenceItem]](repeating: [], count: count) }
-        func set(_ index: Int, _ items: [PersistenceItem]) {
-            lock.lock(); defer { lock.unlock() }
-            slots[index] = items
-        }
-        var flattened: [PersistenceItem] {
-            lock.lock(); defer { lock.unlock() }
-            return slots.flatMap { $0 }
+        // A task group rather than `DispatchQueue.concurrentPerform`, which blocks
+        // the calling cooperative thread for the duration.
+        return await withTaskGroup(of: [PersistenceItem].self) { group in
+            for browser in installedBrowsers {
+                group.addTask { self.scanOneChromiumBrowser(browser) }
+            }
+            var all: [PersistenceItem] = []
+            for await items in group { all += items }
+            return all
         }
     }
 

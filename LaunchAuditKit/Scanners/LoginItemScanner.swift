@@ -4,180 +4,152 @@ public struct LoginItemScanner: PersistenceScanner {
     public let category = PersistenceCategory.loginItems
     public let requiresPrivilege = false
 
+    /// AppleScript that emits one record per line as `name<TAB>path`.
+    ///
+    /// The previous script returned `{name, path} of every login item`, i.e. two
+    /// parallel lists, and the parser assumed osascript would brace them. It does
+    /// not — `osascript -e 'return {{"a","b"},{"c","d"}}'` prints `a, b, c, d` —
+    /// so five login items were folded into a single item named
+    /// "Item1, Item2, Item3, Item4, Item5" carrying only the first path. A
+    /// line-delimited record format removes the ambiguity entirely and also
+    /// survives application names that contain a comma.
+    private static let loginItemsScript = """
+    set AppleScript's text item delimiters to linefeed
+    set output to {}
+    tell application "System Events"
+        repeat with anItem in login items
+            try
+                set itemPath to path of anItem
+            on error
+                set itemPath to ""
+            end try
+            set end of output to (name of anItem) & tab & itemPath
+        end repeat
+    end tell
+    return output as text
+    """
+
     public var scanPaths: [String] {
-        [
-            PathUtilities.expandTilde("~/Library/Application Support/com.apple.backgroundtaskmanagementagent"),
-        ]
+        var paths: [String] = []
+        for (_, home) in PathUtilities.scannableHomeDirectories() {
+            paths.append((home as NSString).appendingPathComponent("Library/Preferences/ByHost"))
+        }
+        return paths
     }
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
-        var items: [PersistenceItem] = []
-        var seenNames = Set<String>()
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
+        var seenKeys = Set<String>()
 
-        // Method 1: Query System Events via osascript for login items.
-        // Skip in headless/CLI mode — osascript can trigger GUI permission dialogs.
-        // Direct invocation (no /bin/sh fork) plus a 3s cap so a hung
-        // System Events doesn't stall the whole scan; BTMScanner is the
-        // canonical source on macOS 13+ and runs independently.
-        if ProcessInfo.processInfo.environment["LAUNCHAUDIT_HEADLESS"] == nil {
+        // Method 1: System Events. Skipped when interactive prompts must be
+        // avoided — Apple Events raise an Automation consent dialog on first use,
+        // and BTMScanner is the canonical source on macOS 13+ anyway.
+        if !ScanEnvironment.shared.avoidInteractivePrompts {
             if let output = await ProcessRunner.shared.tryRun(
                 "/usr/bin/osascript",
-                arguments: [
-                    "-e",
-                    "tell application \"System Events\" to get {name, path} of every login item"
-                ],
-                timeout: 3
+                arguments: ["-e", Self.loginItemsScript],
+                timeout: 5
             ) {
-                let parsed = parseSystemEventsOutput(output)
-                for item in parsed {
-                    seenNames.insert(item.name.lowercased())
-                    items.append(item)
+                for item in parseSystemEventsOutput(output) {
+                    seenKeys.insert(item.name.lowercased())
+                    outcome.items.append(item)
                 }
+            } else {
+                outcome.errors.append(ScanError(
+                    category: category,
+                    message: "Could not query System Events for login items. If macOS "
+                        + "denied the Automation prompt, grant access in System Settings → "
+                        + "Privacy & Security → Automation.",
+                    isPermissionDenied: true
+                ))
             }
         }
 
-        // Method 2: Check loginwindow plist for AutoLaunchedApplicationDictionary
-        let byHostDir = PathUtilities.expandTilde("~/Library/Preferences/ByHost")
-        let plistFiles = PathUtilities.listFiles(in: byHostDir, withExtension: "plist")
-        for plistPath in plistFiles {
-            guard (plistPath as NSString).lastPathComponent.hasPrefix("com.apple.loginwindow") else {
-                continue
-            }
-            if let dict = try? PlistParser().parse(at: plistPath),
-               let autoLaunch = dict["AutoLaunchedApplicationDictionary"] as? [[String: Any]] {
+        // Method 2: loginwindow's AutoLaunchedApplicationDictionary, per user.
+        for (user, home) in PathUtilities.scannableHomeDirectories() {
+            let byHostDir = (home as NSString).appendingPathComponent("Library/Preferences/ByHost")
+            let (plistFiles, listErrors) = entries(in: byHostDir, withExtension: "plist")
+            outcome.errors += listErrors
+
+            for plistPath in plistFiles {
+                guard (plistPath as NSString).lastPathComponent
+                    .hasPrefix("com.apple.loginwindow") else { continue }
+
+                let dict: [String: Any]
+                do {
+                    dict = try PlistParser().parse(at: plistPath)
+                } catch {
+                    outcome.errors.append(scanError(error, path: plistPath))
+                    continue
+                }
+
+                guard let autoLaunch = dict["AutoLaunchedApplicationDictionary"]
+                    as? [[String: Any]] else { continue }
+
                 for entry in autoLaunch {
                     let name = entry["Name"] as? String ?? "Unknown"
-                    guard !seenNames.contains(name.lowercased()) else { continue }
-                    seenNames.insert(name.lowercased())
+                    guard !seenKeys.contains(name.lowercased()) else { continue }
+                    seenKeys.insert(name.lowercased())
 
                     let path = entry["Path"] as? String
                     let hide = entry["Hide"] as? Bool ?? false
-                    items.append(PersistenceItem(
+                    outcome.items.append(PersistenceItem(
                         category: category,
                         name: name,
                         configPath: plistPath,
-                        executablePath: path,
+                        executablePath: path.flatMap { resolveExecutable($0) } ?? path,
                         isEnabled: true,
                         runContext: .login,
-                        owner: .user(PathUtilities.currentUser),
+                        owner: .user(user),
+                        timestamps: PathUtilities.timestamps(for: plistPath),
                         rawMetadata: [
                             "Hide": .bool(hide),
-                            "Source": .string("loginwindow plist")
+                            "Source": .string("loginwindow plist"),
                         ]
                     ))
                 }
             }
         }
 
-        // Method 3: Scan ~/Library/LaunchAgents for login items not covered above
-        let userAgentsDir = PathUtilities.expandTilde("~/Library/LaunchAgents")
-        if PathUtilities.exists(userAgentsDir) {
-            let agentFiles = PathUtilities.listFiles(in: userAgentsDir, withExtension: "plist")
-            for agentPath in agentFiles {
-                let filename = (agentPath as NSString).lastPathComponent
-                let label = (filename as NSString).deletingPathExtension
-                guard !seenNames.contains(label.lowercased()) else { continue }
+        // NOTE: `~/Library/LaunchAgents` is deliberately *not* scanned here.
+        // LaunchAgentScanner already covers it, and doing it in both places
+        // reported every user agent twice under two different categories, with
+        // two different mechanism severities and two different risk scores.
 
-                guard let content = try? Data(contentsOf: URL(fileURLWithPath: agentPath)),
-                      let dict = try? PropertyListSerialization.propertyList(
-                        from: content, format: nil
-                      ) as? [String: Any] else { continue }
-
-                let plistLabel = dict["Label"] as? String ?? label
-                guard !seenNames.contains(plistLabel.lowercased()) else { continue }
-                seenNames.insert(plistLabel.lowercased())
-
-                let program = dict["Program"] as? String
-                let programArgs = dict["ProgramArguments"] as? [String]
-                let executable = program ?? programArgs?.first
-                let runAtLoad = dict["RunAtLoad"] as? Bool ?? false
-
-                let resolvedExec: String?
-                if let exec = executable,
-                   exec.hasSuffix(".app") || exec.hasSuffix(".app/") {
-                    resolvedExec = resolveAppExecutable(exec) ?? exec
-                } else {
-                    resolvedExec = executable
-                }
-
-                items.append(PersistenceItem(
-                    category: category,
-                    name: plistLabel,
-                    label: plistLabel,
-                    configPath: agentPath,
-                    executablePath: resolvedExec,
-                    isEnabled: !(dict["Disabled"] as? Bool ?? false),
-                    runContext: runAtLoad ? .login : .onDemand,
-                    owner: .user(PathUtilities.currentUser),
-                    rawMetadata: [
-                        "Source": .string("~/Library/LaunchAgents")
-                    ]
-                ))
-            }
-        }
-
-        return items
+        return outcome
     }
 
     // MARK: - System Events Parsing
 
-    private func parseSystemEventsOutput(_ output: String) -> [PersistenceItem] {
+    /// Parse the line-delimited `name<TAB>path` output.
+    func parseSystemEventsOutput(_ output: String) -> [PersistenceItem] {
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "missing value" else { return [] }
 
-        let names: [String]
-        let paths: [String]
-
-        if trimmed.hasPrefix("{") {
-            let parts = trimmed.components(separatedBy: "}, {")
-            guard parts.count == 2 else {
-                let cleaned = trimmed
-                    .trimmingCharacters(in: CharacterSet(charactersIn: "{}"))
-                return splitPair(cleaned).map { [$0] } ?? []
-            }
-            let namesPart = parts[0]
-                .trimmingCharacters(in: CharacterSet(charactersIn: "{ }"))
-            let pathsPart = parts[1]
-                .trimmingCharacters(in: CharacterSet(charactersIn: "} "))
-
-            names = namesPart.components(separatedBy: ", ")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-            paths = pathsPart.components(separatedBy: ", ")
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-        } else {
-            if let item = splitPair(trimmed) {
-                return [item]
-            }
-            return []
-        }
-
         var items: [PersistenceItem] = []
-        for i in 0..<names.count {
-            let name = names[i]
-            let path = i < paths.count ? paths[i] : nil
-            guard !name.isEmpty else { continue }
+        for line in trimmed.components(separatedBy: .newlines) {
+            guard !line.trimmingCharacters(in: .whitespaces).isEmpty else { continue }
 
-            let executablePath: String?
-            if let p = path {
-                if p.hasSuffix(".app") || p.hasSuffix(".app/") {
-                    executablePath = resolveAppExecutable(p) ?? p
-                } else {
-                    executablePath = p
-                }
-            } else {
-                executablePath = nil
-            }
+            let fields = line.components(separatedBy: "\t")
+            let name = fields[0].trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, name != "missing value" else { continue }
+
+            var path: String? = fields.count > 1
+                ? fields[1].trimmingCharacters(in: .whitespaces)
+                : nil
+            if path?.isEmpty == true || path == "missing value" { path = nil }
 
             items.append(PersistenceItem(
                 category: category,
                 name: name,
                 configPath: path,
-                executablePath: executablePath,
+                executablePath: path.flatMap { resolveExecutable($0) } ?? path,
                 isEnabled: true,
                 runContext: .login,
                 owner: .user(PathUtilities.currentUser),
+                timestamps: path.map { PathUtilities.timestamps(for: $0) } ?? ItemTimestamps(),
                 rawMetadata: ["Source": .string("System Events")]
             ))
         }
@@ -185,56 +157,18 @@ public struct LoginItemScanner: PersistenceScanner {
         return items
     }
 
-    private func splitPair(_ text: String) -> PersistenceItem? {
-        let parts = text.components(separatedBy: ", ")
-        guard !parts.isEmpty else { return nil }
-
-        var nameParts: [String] = []
-        var path: String?
-
-        for part in parts {
-            let cleaned = part.trimmingCharacters(in: .whitespaces)
-            if path == nil && (cleaned.hasPrefix("/") || cleaned.hasPrefix("~")) {
-                path = cleaned
-            } else if path == nil {
-                nameParts.append(cleaned)
-            }
-        }
-
-        let name = nameParts.joined(separator: ", ")
-        guard !name.isEmpty else { return nil }
-
-        let executablePath: String?
-        if let p = path {
-            if p.hasSuffix(".app") || p.hasSuffix(".app/") {
-                executablePath = resolveAppExecutable(p) ?? p
-            } else {
-                executablePath = p
-            }
-        } else {
-            executablePath = nil
-        }
-
-        return PersistenceItem(
-            category: category,
-            name: name,
-            configPath: path,
-            executablePath: executablePath,
-            isEnabled: true,
-            runContext: .login,
-            owner: .user(PathUtilities.currentUser),
-            rawMetadata: ["Source": .string("System Events")]
-        )
-    }
-
-    private func resolveAppExecutable(_ appPath: String) -> String? {
+    /// Resolve an app bundle to the binary inside it so the signature can be
+    /// verified; pass other paths through unchanged.
+    private func resolveExecutable(_ path: String) -> String? {
+        guard path.hasSuffix(".app") || path.hasSuffix(".app/") else { return path }
+        let appPath = path.hasSuffix("/") ? String(path.dropLast()) : path
         let infoPlistPath = (appPath as NSString).appendingPathComponent("Contents/Info.plist")
         guard let dict = try? PlistParser().parse(at: infoPlistPath),
               let execName = dict["CFBundleExecutable"] as? String else {
-            return nil
+            return appPath
         }
         let execPath = (appPath as NSString)
             .appendingPathComponent("Contents/MacOS/\(execName)")
-        return PathUtilities.exists(execPath) ? execPath : nil
+        return PathUtilities.exists(execPath) ? execPath : appPath
     }
 }

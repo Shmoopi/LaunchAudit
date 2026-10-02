@@ -44,18 +44,25 @@ public struct PAMScanner: PersistenceScanner {
 
     public init() {}
 
-    public func scan() async throws -> [PersistenceItem] {
+    public func scan() async throws -> ScanOutcome {
+        var outcome = ScanOutcome()
         var items: [PersistenceItem] = []
 
         // --- Phase 1: Scan PAM config files ---
         let pamDir = "/etc/pam.d"
-        guard PathUtilities.exists(pamDir) else { return items }
+        let (configs, configErrors) = entries(in: pamDir)
+        outcome.errors += configErrors
 
-        let configs = PathUtilities.listFiles(in: pamDir)
         for configPath in configs {
             let name = (configPath as NSString).lastPathComponent
-            guard !name.hasPrefix(".") else { continue }
-            guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else { continue }
+            let content: String
+            do {
+                content = try SafeRead.text(atPath: configPath, maxBytes: 256 * 1024)
+            } catch {
+                // An unreadable PAM config must not look like a clean one.
+                outcome.errors.append(scanError(error, path: configPath))
+                continue
+            }
 
             let timestamps = PathUtilities.timestamps(for: configPath)
             var referencedModules: [(name: String, path: String?)] = []
@@ -82,14 +89,23 @@ public struct PAMScanner: PersistenceScanner {
 
             var riskLevel: RiskLevel = .informational
             var riskReasons: [String] = []
+            var riskMitigations: [String] = []
 
             if !nonStandardModules.isEmpty {
                 riskLevel = .high
                 riskReasons.append("Non-standard PAM modules: \(nonStandardModules.joined(separator: ", "))")
+            } else {
+                riskMitigations.append(
+                    "Every module referenced here ships with macOS"
+                )
             }
 
-            // All configs in /etc/pam.d/ are on the sealed system volume
-            let source: ItemSource = .apple
+            // NOT Apple by default. `/etc` is a symlink to `/private/etc` on the
+            // *writable* Data volume, and editing `/etc/pam.d/sudo` is a
+            // well-known privilege and persistence technique. Marking these
+            // `.apple` made them hidden by default in both the GUI and the CLI,
+            // so a third-party module dropped in here would never be shown.
+            let source: ItemSource = .unknown
 
             items.append(PersistenceItem(
                 category: category,
@@ -100,6 +116,7 @@ public struct PAMScanner: PersistenceScanner {
                 owner: .system,
                 riskLevel: riskLevel,
                 riskReasons: riskReasons,
+                riskMitigations: riskMitigations,
                 source: source,
                 timestamps: timestamps,
                 rawMetadata: [
@@ -114,9 +131,11 @@ public struct PAMScanner: PersistenceScanner {
         var seenModules: Set<String> = []
 
         for dir in Self.moduleSearchDirs {
-            guard PathUtilities.exists(dir) else { continue }
-            let files = PathUtilities.listFiles(in: dir, withExtension: "so")
-                + PathUtilities.listFiles(in: dir).filter { $0.hasSuffix(".so.2") || $0.hasSuffix(".so.1") }
+            let (allFiles, moduleErrors) = entries(in: dir)
+            outcome.errors += moduleErrors
+            let files = allFiles.filter {
+                $0.hasSuffix(".so") || $0.hasSuffix(".so.2") || $0.hasSuffix(".so.1")
+            }
 
             for modulePath in files {
                 let moduleName = (modulePath as NSString).lastPathComponent
@@ -156,7 +175,8 @@ public struct PAMScanner: PersistenceScanner {
             }
         }
 
-        return items
+        outcome.items = items
+        return outcome
     }
 
     /// Resolve a module path reference from a PAM config to an absolute path.

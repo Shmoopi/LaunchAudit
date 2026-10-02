@@ -4,14 +4,13 @@ import ServiceManagement
 
 @MainActor
 public final class ScanViewModel: ObservableObject {
-    @Published public var lastResult: ScanResult?
+    @Published public var lastResult: ScanResult? { didSet { recomputeFilteredItems() } }
     @Published public var isScanning = false
-    @Published public var progress = ScanProgress()
-    @Published public var searchText = ""
-    @Published public var minimumRiskFilter: RiskLevel?
-    @Published public var showOnlyUnsigned = false
-    @Published public var showOnlyThirdParty = false
-    @Published public var hideAppleSigned = true
+    @Published public var searchText = "" { didSet { recomputeFilteredItems() } }
+    @Published public var minimumRiskFilter: RiskLevel? { didSet { recomputeFilteredItems() } }
+    @Published public var showOnlyUnsigned = false { didSet { recomputeFilteredItems() } }
+    @Published public var showOnlyThirdParty = false { didSet { recomputeFilteredItems() } }
+    @Published public var hideAppleSigned = true { didSet { recomputeFilteredItems() } }
     @Published public var hideEmptyCategories = true
     @Published public var showExportSheet = false
     @Published public var exportFormat: ExportFormat = .json
@@ -20,57 +19,97 @@ public final class ScanViewModel: ObservableObject {
     /// → General → Login Items & Extensions. Other values are informational.
     @Published public var privilegeStatus: PrivilegeStatus = .unknown
 
+    /// Set when something the user asked for failed. Rendered as an alert —
+    /// previously every failure in the app was a `print` to the console.
+    @Published public var alert: UserFacingAlert?
+
     /// Per-session dismissal flag for the privilege banner. Reset on each
     /// new scan attempt so the user is re-informed if the situation hasn't
     /// changed — but not nagged within a single session if they choose to
     /// proceed without elevation.
     @Published public var privilegeBannerDismissed = false
 
+    /// Scan progress lives in its own object so the 10 Hz updates during a scan
+    /// redraw only the progress indicator. As a `@Published` property here, every
+    /// tick invalidated the sidebar, dashboard and table — each of which re-ran
+    /// every filter over every item.
+    public let scanProgress = ScanProgressModel()
+
+    // Filter results, recomputed once when an input changes rather than on every
+    // property access. The sidebar alone used to re-filter the full item list
+    // roughly 100 times per render.
+    public private(set) var displayItems: [PersistenceItem] = []
+    public private(set) var filteredItems: [PersistenceItem] = []
+    private var filteredByCategory: [PersistenceCategory: [PersistenceItem]] = [:]
+    private var unfilteredCountByCategory: [PersistenceCategory: Int] = [:]
+    private var highestRiskByCategory: [PersistenceCategory: RiskLevel] = [:]
+    private var blockedCategories: Set<PersistenceCategory> = []
+    /// Dashboard figures, over `displayItems`.
+    private(set) var dashboardStats = DashboardStats()
+
     private let coordinator = ScanCoordinator()
+    private var scanTask: Task<Void, Never>?
 
     public init() {}
 
+    // MARK: - Scanning
+
+    /// Start a scan, replacing any in flight.
+    ///
+    /// Held as a task so it can be cancelled: the scan used to be unstoppable, with
+    /// a full-window modal scrim and no Cancel button, so a wedged scan left Force
+    /// Quit as the only exit.
+    public func startScanTask() {
+        guard !isScanning else { return }
+        scanTask?.cancel()
+        scanTask = Task { await startScan() }
+    }
+
+    public func cancelScan() {
+        scanTask?.cancel()
+    }
+
     public func startScan() async {
+        guard !isScanning else { return }
         isScanning = true
+        defer { isScanning = false }
 
         #if DEMO_MODE
-        // Simulate a brief scan delay then load demo data
+        scanProgress.reset()
         try? await Task.sleep(for: .seconds(1.5))
         lastResult = DemoDataProvider.makeScanResult()
-        progress.phase = .complete
         #else
-        // Register the privileged helper before scanning. First-launch users
-        // will see macOS's "Background Items Added" prompt and be directed
-        // to System Settings to approve. If they decline, the scan still
-        // runs — privileged scanners just return empty (handled per-scanner).
+        scanProgress.reset()
         await ensureHelperRegistered()
 
-        // Forward progress from coordinator
-        let task = Task {
+        // Mirror the coordinator's progress into the progress model.
+        let mirror = Task { [weak self] in
             while !Task.isCancelled {
-                self.progress = coordinator.progress
+                guard let self else { return }
+                self.scanProgress.update(from: self.coordinator.progress)
                 try? await Task.sleep(for: .milliseconds(100))
             }
         }
+        defer { mirror.cancel() }
 
         let result = await coordinator.performFullScan()
-        task.cancel()
-
         lastResult = result
-        progress = coordinator.progress
+        scanProgress.update(from: coordinator.progress)
         #endif
-        isScanning = false
     }
 
     /// Idempotent — calling repeatedly is cheap once the daemon is enabled.
-    /// Errors are non-fatal: scanning proceeds without privileged data.
+    /// Errors are non-fatal: scanning proceeds, and the affected categories report
+    /// their own coverage gaps.
     private func ensureHelperRegistered() async {
-        // Reset per-session dismissal so the banner can re-appear if the
-        // user toggled the daemon off in System Settings between scans.
         resetPrivilegeBannerDismissal()
         do {
-            try await PrivilegeBroker.shared.installHelperIfNeeded()
-            privilegeStatus = .enabled
+            // `installHelperIfNeeded` re-reads the status after registering.
+            // Assuming success meant a first-run user was recorded as `.enabled`
+            // while the daemon sat unapproved, so the banner explaining what to do
+            // never appeared on the run where it mattered most.
+            let status = try await PrivilegeBroker.shared.installHelperIfNeeded()
+            privilegeStatus = status == .enabled ? .enabled : .requiresApproval
         } catch PrivilegeBrokerError.requiresApproval {
             privilegeStatus = .requiresApproval
         } catch {
@@ -115,53 +154,123 @@ public final class ScanViewModel: ObservableObject {
 
     // MARK: - Filtering
 
-    /// All items after applying the Apple-signed filter (used by dashboard and counts).
-    public var displayItems: [PersistenceItem] {
-        guard let result = lastResult else { return [] }
-        if hideAppleSigned {
-            return result.items.filter { !$0.isAppleSignedAndNotarized }
+    /// Every filter currently narrowing the view, in words.
+    public var activeFilterDescriptions: [String] {
+        var descriptions: [String] = []
+        if hideAppleSigned { descriptions.append("Apple system items hidden") }
+        if let minimumRiskFilter {
+            descriptions.append("\(minimumRiskFilter.displayName) risk and above")
         }
-        return result.items
+        if showOnlyUnsigned { descriptions.append("Unsigned only") }
+        if showOnlyThirdParty { descriptions.append("Third-party only") }
+        if !searchText.isEmpty { descriptions.append("Search: “\(searchText)”") }
+        return descriptions
+    }
+
+    public var hasActiveFilters: Bool { !activeFilterDescriptions.isEmpty }
+
+    public func clearFilters() {
+        hideAppleSigned = false
+        minimumRiskFilter = nil
+        showOnlyUnsigned = false
+        showOnlyThirdParty = false
+        searchText = ""
+    }
+
+    /// Rebuild every filtered view of the results.
+    ///
+    /// A high or critical finding is never hidden by the Apple filter: "hide Apple
+    /// system items" means "hide the routine OS rows", not "suppress serious
+    /// findings that happen to look Apple".
+    private func recomputeFilteredItems() {
+        let all = lastResult?.items ?? []
+        let display = hideAppleSigned
+            ? all.filter { !$0.isVerifiedAppleSoftware || $0.riskLevel >= .high }
+            : all
+
+        let query = searchText.trimmingCharacters(in: .whitespaces)
+        let filtered = display.filter { item in
+            if let minimumRiskFilter, item.riskLevel < minimumRiskFilter { return false }
+            if showOnlyUnsigned, item.signingInfo?.isSigned == true { return false }
+            if showOnlyThirdParty, item.source.isApple { return false }
+            if !query.isEmpty, !Self.item(item, matches: query) { return false }
+            return true
+        }
+
+        displayItems = display
+        filteredItems = filtered
+        filteredByCategory = Dictionary(grouping: filtered, by: \.category)
+        unfilteredCountByCategory = all.reduce(into: [:]) { $0[$1.category, default: 0] += 1 }
+        highestRiskByCategory = filteredByCategory.compactMapValues { $0.map(\.riskLevel).max() }
+        blockedCategories = lastResult?.categoriesBlockedByPermissions ?? []
+        dashboardStats = DashboardStats(items: display)
+    }
+
+    private static func item(_ item: PersistenceItem, matches query: String) -> Bool {
+        item.name.localizedCaseInsensitiveContains(query)
+            || (item.label?.localizedCaseInsensitiveContains(query) ?? false)
+            || (item.configPath?.localizedCaseInsensitiveContains(query) ?? false)
+            || (item.executablePath?.localizedCaseInsensitiveContains(query) ?? false)
+            || item.source.displayName.localizedCaseInsensitiveContains(query)
+            || item.category.displayName.localizedCaseInsensitiveContains(query)
     }
 
     public func filteredItems(for category: PersistenceCategory) -> [PersistenceItem] {
-        var items = displayItems.filter { $0.category == category }
-
-        if let minRisk = minimumRiskFilter {
-            items = items.filter { $0.riskLevel >= minRisk }
-        }
-
-        if showOnlyUnsigned {
-            items = items.filter { $0.signingInfo?.isSigned != true }
-        }
-
-        if showOnlyThirdParty {
-            items = items.filter { !$0.source.isApple }
-        }
-
-        if !searchText.isEmpty {
-            let query = searchText.lowercased()
-            items = items.filter { item in
-                item.name.lowercased().contains(query)
-                || (item.label?.lowercased().contains(query) ?? false)
-                || (item.configPath?.lowercased().contains(query) ?? false)
-                || (item.executablePath?.lowercased().contains(query) ?? false)
-                || item.source.displayName.lowercased().contains(query)
-            }
-        }
-
-        return items
+        filteredByCategory[category] ?? []
     }
 
+    /// Count shown in the sidebar. Applies the same filters the list does, so the
+    /// badge and the list it leads to always agree.
     public func itemCount(for category: PersistenceCategory) -> Int {
-        displayItems.filter { $0.category == category }.count
+        filteredByCategory[category]?.count ?? 0
+    }
+
+    /// Total number of items in a category before filtering — used to explain an
+    /// empty list ("12 items, none match the active filters").
+    public func unfilteredCount(for category: PersistenceCategory) -> Int {
+        unfilteredCountByCategory[category] ?? 0
     }
 
     public func highestRisk(for category: PersistenceCategory) -> RiskLevel? {
-        displayItems
-            .filter { $0.category == category }
-            .map(\.riskLevel)
-            .max()
+        highestRiskByCategory[category]
+    }
+
+    /// Whether this category's results are known to be incomplete.
+    public func isCoverageBlocked(for category: PersistenceCategory) -> Bool {
+        blockedCategories.contains(category)
+    }
+}
+
+/// Live scan progress, observed only by the views that draw it.
+@MainActor
+public final class ScanProgressModel: ObservableObject {
+    @Published public private(set) var fractionComplete: Double = 0
+    @Published public private(set) var statusText: String = ""
+
+    /// Publish only when something visible changed; the coordinator is polled at
+    /// 10 Hz and most ticks carry no new information.
+    func update(from progress: ScanProgress) {
+        let fraction = (progress.fractionComplete * 100).rounded() / 100
+        if fraction != fractionComplete { fractionComplete = fraction }
+        let text = progress.statusText
+        if text != statusText { statusText = text }
+    }
+
+    func reset() {
+        fractionComplete = 0
+        statusText = "Preparing scan…"
+    }
+}
+
+/// A message that needs the user's attention.
+public struct UserFacingAlert: Identifiable, Sendable {
+    public let id = UUID()
+    public let title: String
+    public let message: String
+
+    public init(title: String, message: String) {
+        self.title = title
+        self.message = message
     }
 }
 

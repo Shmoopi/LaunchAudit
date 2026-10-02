@@ -5,9 +5,12 @@ public struct PlistParser: Sendable {
     public init() {}
 
     /// Parse a plist file at the given path into a dictionary.
+    ///
+    /// Reads through `SafeRead`, which refuses symlinked leaves, special files
+    /// and oversized input — every path a scanner reaches here is potentially
+    /// attacker-controlled.
     public func parse(at path: String) throws -> [String: Any] {
-        let url = URL(fileURLWithPath: path)
-        let data = try Data(contentsOf: url)
+        let data = try SafeRead.data(atPath: path)
         return try parse(data: data)
     }
 
@@ -137,16 +140,42 @@ public struct LaunchdPlistInfo: Sendable {
     }
 
     /// Resolve the executable path from Program or ProgramArguments[0].
+    ///
+    /// This is what launchd actually exec's. When it is an interpreter, the code
+    /// that really runs lives in the arguments — see `interpretedPayload`.
     public var resolvedExecutable: String? {
         program ?? programArguments.first
     }
 
+    /// When the registered executable is a general-purpose interpreter, the
+    /// script or inline command it will run.
+    public var interpretedPayload: InterpreterPayload? {
+        guard let executable = resolvedExecutable,
+              Interpreters.isInterpreter(executable) else { return nil }
+        // `Program` plus `ProgramArguments` is legal; argv[0] may or may not
+        // repeat the program path, which `payload` normalizes.
+        return Interpreters.payload(interpreter: executable, arguments: programArguments)
+    }
+
     /// Determine the run context from plist configuration.
-    public var runContext: RunContext {
+    ///
+    /// `loadContext` is what `RunAtLoad` means for the enclosing domain: a
+    /// LaunchDaemon loads at system boot, a LaunchAgent at user login. Without
+    /// it every daemon would be reported as running at login, which is both wrong
+    /// in the UI and makes the boot-time branch of the risk model unreachable.
+    public func runContext(loadContext: RunContext) -> RunContext {
         if keepAlive { return .always }
-        if runAtLoad { return .login }
+        if runAtLoad { return loadContext }
         if startInterval != nil || !startCalendarIntervals.isEmpty { return .scheduled }
         if !watchPaths.isEmpty || !queueDirectories.isEmpty { return .onDemand }
+        // No trigger keys at all: launchd will still start it on demand if it
+        // publishes a Mach service or a socket.
+        if rawDictionary["MachServices"] != nil || rawDictionary["Sockets"] != nil {
+            return .onDemand
+        }
         return .manual
     }
+
+    /// Convenience for callers with no domain information.
+    public var runContext: RunContext { runContext(loadContext: .login) }
 }
